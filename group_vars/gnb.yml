@@ -4,9 +4,13 @@
 # ---------------------------------------------------------------------------
 # srsRAN Project build-from-source settings
 # ---------------------------------------------------------------------------
+# Supports pulling from custom repos with source_repo, git_username, and
+# git_password, leave these as-is for the official repo.
 
 srsran_source_repo: "https://github.com/srsRAN/srsRAN_Project.git"
 srsran_source_version: "release_24_10_1"   # pinned for srsUE compat (see VERSION_PINNING.md)
+srsran_git_username: ""   # Username for private repos
+srsran_git_password: ""   # Password for private repos
 srsran_source_dir: "/usr/local/src/srsRAN_Project"
 srsran_install_prefix: "/usr/local"
 
