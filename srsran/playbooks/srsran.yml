@@ -1,0 +1,19 @@
+# playbooks/srsran.yml
+---
+# 1) Run preflight (shared Pi validation from common/)
+- import_playbook: ../../common/playbooks/preflight/main.yml
+
+# 2) Alias preflight_pass → candidate
+- name: "Alias preflight_pass → candidate"
+  hosts: preflight_pass
+  gather_facts: false
+  tasks:
+    - name: "Tag host as 'candidate'"
+      ansible.builtin.group_by:
+        key: "candidate"
+
+# 3) Harden Pi for headless server use (shared from common/)
+- import_playbook: ../../common/playbooks/pi_setup.yml
+
+# 4) Build and install srsRAN Project
+- import_playbook: srsran_install/main.yml

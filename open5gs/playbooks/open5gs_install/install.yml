@@ -1,0 +1,23 @@
+---
+- name: "Open5GS | Install (method: {{ open5gs_install_method }})"
+  hosts: candidate:&core
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: "Validate open5gs_install_method"
+      ansible.builtin.assert:
+        that:
+          - open5gs_install_method in ['apt', 'source']
+        fail_msg: >-
+          open5gs_install_method must be 'apt' or 'source',
+          got '{{ open5gs_install_method }}'.
+
+  tasks:
+    - name: "Install via apt packages"
+      ansible.builtin.include_tasks: tasks/install_apt.yml
+      when: open5gs_install_method == "apt"
+
+    - name: "Install from source"
+      ansible.builtin.include_tasks: tasks/install_source.yml
+      when: open5gs_install_method == "source"

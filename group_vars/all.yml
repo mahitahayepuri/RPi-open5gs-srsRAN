@@ -1,0 +1,65 @@
+# Shared defaults for all Raspberry Pis (both core and gNB)
+# Override per-host or via --extra-vars as needed
+
+# Localization
+timezone: "America/Toronto"
+locale_default: "en_US.UTF-8"
+locales_to_generate:
+  - "en_US.UTF-8 UTF-8"
+keyboard_layout: "us"
+
+# OS updates / reboots
+reboot_after_updates: true
+
+# dtoverlay/dtparam entries to enforce in boot config
+boot_overlays:
+  - "disable-bt"
+  - "disable-wifi"
+boot_config_path: "/boot/firmware/config.txt"
+
+# Pi user
+pi_user: "pi"
+
+# ---------------------------------------------------------------------------
+# Grafana metrics stack (deployed on [grafana] host, typically the core Pi)
+# ---------------------------------------------------------------------------
+# These live in all.yml because the Grafana play runs on the core Pi but
+# needs srsRAN repo/version info for cloning the docker/ directory.
+srsran_source_repo: "https://github.com/srsRAN/srsRAN_Project.git"
+srsran_source_version: "release_24_10_1"
+srsran_grafana_source_dir: "/opt/srsran-metrics"
+srsran_grafana_gnb_addr: "10.53.1.2"
+srsran_grafana_port: 3300
+
+# ---------------------------------------------------------------------------
+# Network identity — shared across core, gNB, and UE
+# ---------------------------------------------------------------------------
+# The PLMN (MCC + MNC) and TAC must be identical on the AMF, gNB, and UE.
+# Changing these requires updating ALL three (use reconfigure-plmn.yml for
+# live changes, or edit here and re-deploy).
+# Default test PLMN: MCC=001, MNC=01 (IANA test network).
+open5gs_mcc: "001"
+open5gs_mnc: "01"
+open5gs_tac: 7
+
+# ---------------------------------------------------------------------------
+# Test subscriber credentials — shared across UE config and core provisioning
+# ---------------------------------------------------------------------------
+# These live in all.yml because the subscriber record is written to MongoDB
+# on the core Pi, but the credentials are also used in the srsUE config on
+# the gNB Pi. Both hosts need access to the same values.
+# The IMSI is auto-derived from the PLMN + MSIN — if you change MCC/MNC
+# above, the IMSI updates automatically.
+srsue_msin: "0000000001"                     # subscriber number within the PLMN
+srsue_imsi: "{{ open5gs_mcc }}{{ open5gs_mnc }}{{ srsue_msin }}"
+srsue_ki:   "465B5CE8B199B49FAA5F0A2EE238A6BC"
+srsue_opc:  "E8ED289DEBA952E4283B54E88E6183CA"
+srsue_imei: "353490069873319"
+srsue_apn:  "internet"
+
+# ---------------------------------------------------------------------------
+# Pi hardware monitor (CPU temperature, throttle state, load, memory)
+# ---------------------------------------------------------------------------
+# Deployed to all Pis by pi_setup.yml.  See PI_MONITOR.md for details.
+pi_monitor_enabled: true                      # deploy and enable the pi-monitor service
+pi_monitor_interval: 5                        # seconds between samples

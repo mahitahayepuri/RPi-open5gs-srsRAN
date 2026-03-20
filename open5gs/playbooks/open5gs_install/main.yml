@@ -1,0 +1,15 @@
+---
+# Open5GS installation pipeline (runs on hosts that passed preflight)
+#
+# Supports two install methods controlled by open5gs_install_method:
+#   "apt"    - pre-built arm64 packages from OBS (recommended, fast)
+#   "source" - compile from git (for custom builds / patching)
+
+- import_playbook: docker.yml
+- import_playbook: mongodb.yml
+- import_playbook: tun_setup.yml
+- import_playbook: install.yml
+- import_playbook: network.yml
+- import_playbook: logging.yml
+- import_playbook: services.yml
+- import_playbook: webui.yml

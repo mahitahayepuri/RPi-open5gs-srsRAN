@@ -1,0 +1,57 @@
+---
+- name: Preflight | OS check (Raspberry Pi OS Trixie)
+  hosts: rpi
+  gather_facts: false
+
+  tasks:
+    - name: Slurp /etc/os-release
+      ansible.builtin.slurp:
+        src: /etc/os-release
+      register: osrel_raw
+      changed_when: false
+      # /etc/os-release is the standard OS identification file
+
+    - name: Parse os-release (Jinja-only, no dict comprehension)        
+      ansible.builtin.set_fact:
+        osrel_lines: >-
+          {{
+            (osrel_raw.content | b64decode).splitlines()
+            | select('match', '^[A-Z0-9_]+=')
+            | map('regex_replace', '^([A-Z0-9_]+)=(.*)$', '\1: \2')
+            | list
+          }}
+
+    - name: Build os-release dictionary
+      ansible.builtin.set_fact:
+        osrel: "{{ osrel_lines | join('\n') | from_yaml }}"
+
+    - name: Check for Raspberry Pi OS APT source (64-bit)
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list.d/raspi.sources
+      register: raspi_sources_64
+      changed_when: false
+
+    - name: Check for Raspberry Pi OS APT source (32-bit)
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list.d/raspbian.sources
+      register: raspi_sources_32
+      changed_when: false
+
+    - name: Determine if official Raspberry Pi OS (raspi/raspbian sources present)
+      ansible.builtin.set_fact:
+        is_rpi_os: "{{ raspi_sources_64.stat.exists or raspi_sources_32.stat.exists }}"
+
+    - name: Assert Raspberry Pi OS based on Debian 13 (Trixie)
+      ansible.builtin.assert:
+        that:
+          - is_rpi_os
+          - osrel.VERSION_CODENAME is defined
+          - osrel.VERSION_CODENAME | lower == 'trixie'
+        fail_msg: >-
+          Not Raspberry Pi OS based on Debian 13 (Trixie).
+          is_rpi_os={{ is_rpi_os }},
+          VERSION_CODENAME={{ osrel.VERSION_CODENAME | default('N/A') }},
+          PRETTY_NAME={{ osrel.PRETTY_NAME | default('N/A') }}
+        success_msg: >-
+          OK: Raspberry Pi OS (Debian 13 / Trixie).
+          PRETTY_NAME={{ osrel.PRETTY_NAME | default('N/A') }}

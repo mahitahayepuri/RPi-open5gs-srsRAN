@@ -1,0 +1,225 @@
+---
+# Reconfigure the PLMN (MCC/MNC) and TAC on a running 5G SA network.
+#
+# This playbook patches the AMF, gNB, and srsUE configs, then restarts the
+# affected services. Use it to change the network identity without re-running
+# the full deployment pipelines.
+#
+# Usage:
+#   # Use current values from group_vars/all.yml:
+#   ansible-playbook -i inventory-pi5.ini reconfigure-plmn.yml
+#
+#   # Override on the command line:
+#   ansible-playbook -i inventory-pi5.ini reconfigure-plmn.yml \
+#     -e open5gs_mcc=001 -e open5gs_mnc=01 -e open5gs_tac=7
+#
+# Variables (defined in group_vars/all.yml, override with -e):
+#   open5gs_mcc   -- Mobile Country Code  (default: "001")
+#   open5gs_mnc   -- Mobile Network Code  (default: "01")
+#   open5gs_tac   -- Tracking Area Code   (default: 7)
+#
+# The gNB PLMN is derived from MCC+MNC (e.g. MCC=001, MNC=01 -> "00101").
+# The srsUE IMSI is re-derived automatically from the new PLMN + MSIN.
+# If srsUE has not been deployed, its stages are skipped gracefully.
+
+# ---------------------------------------------------------------------------
+# 1. Patch the AMF config on the core Pi
+# ---------------------------------------------------------------------------
+- name: "Reconfigure PLMN/TAC — Open5GS AMF"
+  hosts: core
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "Show target PLMN and TAC"
+      ansible.builtin.debug:
+        msg: "Setting PLMN to MCC={{ open5gs_mcc }} MNC={{ open5gs_mnc }}, TAC={{ open5gs_tac }}"
+
+    - name: "Patch AMF config — set NGAP address, PLMN, and TAC"
+      ansible.builtin.command:
+        cmd: >-
+          yq -i '
+            .amf.ngap.server[0].address = "{{ open5gs_ran_addr }}" |
+            .amf.guami[0].plmn_id.mcc = "{{ open5gs_mcc }}" |
+            .amf.guami[0].plmn_id.mnc = "{{ open5gs_mnc }}" |
+            .amf.tai[0].plmn_id.mcc = "{{ open5gs_mcc }}" |
+            .amf.tai[0].plmn_id.mnc = "{{ open5gs_mnc }}" |
+            .amf.tai[0].tac = {{ open5gs_tac }} |
+            .amf.plmn_support[0].plmn_id.mcc = "{{ open5gs_mcc }}" |
+            .amf.plmn_support[0].plmn_id.mnc = "{{ open5gs_mnc }}"
+          ' /etc/open5gs/amf.yaml
+      register: _amf_patch
+      changed_when: true
+
+    - name: "Restart Open5GS stack to apply changes"
+      ansible.builtin.systemd:
+        name: open5gs-stack.target
+        state: restarted
+
+# ---------------------------------------------------------------------------
+# 2. Patch the gNB config on the gNB Pi
+# ---------------------------------------------------------------------------
+- name: "Reconfigure PLMN/TAC — srsRAN gNB"
+  hosts: gnb
+  become: true
+  gather_facts: false
+
+  vars:
+    _gnb_plmn: "{{ open5gs_mcc }}{{ open5gs_mnc }}"
+
+  tasks:
+    - name: "Gather service facts"
+      ansible.builtin.service_facts:
+
+    - name: "Patch gNB config — set PLMN"
+      ansible.builtin.replace:
+        path: "{{ srsran_gnb_config_path | default('/etc/srsran') }}/{{ srsran_gnb_config_file | default('gnb.yml') }}"
+        regexp: '(plmn: )"?\d+"?'
+        replace: '\g<1>"{{ _gnb_plmn }}"'
+      register: _gnb_plmn_result
+
+    - name: "Patch gNB config — set TAC"
+      ansible.builtin.replace:
+        path: "{{ srsran_gnb_config_path | default('/etc/srsran') }}/{{ srsran_gnb_config_file | default('gnb.yml') }}"
+        regexp: '(tac: )\d+'
+        replace: '\g<1>{{ open5gs_tac }}'
+      register: _gnb_tac_result
+
+    - name: "Restart gNB service to apply changes"
+      ansible.builtin.systemd:
+        name: srsran-gnb
+        state: restarted
+      when:
+        - _gnb_plmn_result is changed or _gnb_tac_result is changed
+        - ansible_facts.services['srsran-gnb.service'].state | default('inactive') == 'active'
+
+    - name: "gNB service not running — changes saved, start manually when ready"
+      ansible.builtin.debug:
+        msg: >-
+          gNB config updated (PLMN={{ _gnb_plmn }}, TAC={{ open5gs_tac }}).
+          Start with: sudo systemctl start srsran-gnb
+      when: ansible_facts.services['srsran-gnb.service'].state | default('inactive') != 'active'
+
+# ---------------------------------------------------------------------------
+# 3. Update srsUE config and subscriber record (if srsUE is deployed)
+# ---------------------------------------------------------------------------
+- name: "Reconfigure PLMN/TAC — srsUE config"
+  hosts: ue
+  become: true
+  gather_facts: false
+
+  vars:
+    _ue_config: "{{ srsue_config_dir | default('/etc/srsran_4g') }}/{{ srsue_config_file | default('ue.conf') }}"
+
+  tasks:
+    - name: "Check if srsUE config exists"
+      ansible.builtin.stat:
+        path: "{{ _ue_config }}"
+      register: _ue_conf_stat
+
+    - name: "Patch srsUE config — set IMSI"
+      ansible.builtin.replace:
+        path: "{{ _ue_config }}"
+        regexp: '(imsi\s*=\s*)\d+'
+        replace: '\g<1>{{ srsue_imsi }}'
+      when: _ue_conf_stat.stat.exists
+
+    - name: "srsUE not deployed — skipping config update"
+      ansible.builtin.debug:
+        msg: "{{ _ue_config }} not found — srsUE has not been deployed yet"
+      when: not _ue_conf_stat.stat.exists
+
+- name: "Reconfigure PLMN/TAC — srsUE subscriber record"
+  hosts: core
+  become: true
+  gather_facts: false
+
+  vars:
+    _mongo_container: "open5gs-mongodb"
+
+  tasks:
+    # Remove the old subscriber and add a new one with the updated IMSI.
+    # This is simpler than trying to update the IMSI in-place (IMSI is the
+    # primary key in the subscribers collection).
+    # MongoDB runs in Docker, so we use 'docker exec' to reach the mongo shell.
+    # MongoDB 5.0+ ships 'mongosh'; 4.4 ships 'mongo'.
+    - name: "Detect mongo shell binary"
+      ansible.builtin.shell:
+        cmd: >-
+          docker exec {{ _mongo_container }} sh -c
+          'command -v mongosh || command -v mongo'
+      register: _mongo_shell_result
+      changed_when: false
+
+    - name: "Set _mongo_shell fact"
+      ansible.builtin.set_fact:
+        _mongo_shell: "{{ _mongo_shell_result.stdout | trim | basename }}"
+
+    - name: "Check if any subscriber exists with the old PLMN prefix"
+      ansible.builtin.command:
+        cmd: >-
+          docker exec {{ _mongo_container }} {{ _mongo_shell }} --quiet --eval
+          'db.getSiblingDB("open5gs").subscribers.countDocuments({})'
+      register: _sub_total
+      changed_when: false
+
+    - name: "Check if subscriber with new IMSI already exists"
+      ansible.builtin.command:
+        cmd: >-
+          docker exec {{ _mongo_container }} {{ _mongo_shell }} --quiet --eval
+          'db.getSiblingDB("open5gs").subscribers.countDocuments({imsi: "{{ srsue_imsi }}"})'
+      register: _sub_new
+      changed_when: false
+
+    - name: "Remove old subscriber records (PLMN prefix changed)"
+      ansible.builtin.command:
+        cmd: >-
+          docker exec {{ _mongo_container }} {{ _mongo_shell }} --eval
+          'db.getSiblingDB("open5gs").subscribers.deleteMany({imsi: {$not: /^{{ open5gs_mcc }}{{ open5gs_mnc }}/}})'
+      when:
+        - _sub_total.stdout | trim | int > 0
+        - _sub_new.stdout | trim | int == 0
+      changed_when: true
+
+    - name: "Add subscriber with updated IMSI ({{ srsue_imsi }})"
+      ansible.builtin.command:
+        cmd: >-
+          docker exec {{ _mongo_container }} {{ _mongo_shell }} --eval '
+            db = db.getSiblingDB("open5gs");
+            db.subscribers.insertOne({
+              imsi: "{{ srsue_imsi }}",
+              security: {
+                k:   "{{ srsue_ki }}",
+                opc: "{{ srsue_opc }}",
+                amf: "8000",
+                sqn: NumberLong(513)
+              },
+              slice: [{
+                sst: 1,
+                default_indicator: true,
+                session: [{
+                  name: "{{ srsue_apn }}",
+                  type: 3,
+                  qos: {
+                    index: 9,
+                    arp: {
+                      priority_level: 8,
+                      pre_emption_capability: 1,
+                      pre_emption_vulnerability: 1
+                    }
+                  },
+                  ambr: {
+                    downlink: { value: 1, unit: 3 },
+                    uplink:   { value: 1, unit: 3 }
+                  }
+                }]
+              }]
+            });
+          '
+      when: _sub_new.stdout | trim | int == 0
+      changed_when: true
+
+    - name: "Subscriber with correct IMSI already exists"
+      ansible.builtin.debug:
+        msg: "IMSI {{ srsue_imsi }} already in Open5GS — no change needed"
+      when: _sub_new.stdout | trim | int > 0

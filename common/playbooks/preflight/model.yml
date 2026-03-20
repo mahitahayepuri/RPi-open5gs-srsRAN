@@ -1,0 +1,19 @@
+---
+- name: Preflight | Raspberry Pi model
+  hosts: rpi
+  gather_facts: true
+
+  tasks:
+    - name: Read Device Tree model
+      ansible.builtin.command: cat /sys/firmware/devicetree/base/model
+      register: dt_model
+      changed_when: false
+      failed_when: dt_model.rc != 0
+      # Device Tree model is a standard root-node property; Linux exposes it under /sys/firmware/devicetree/base/model
+      # Devicetree spec/Linux devicetree docs
+
+    - name: Show model from device tree and Ansible facts
+      ansible.builtin.debug:
+        msg:
+          model: "{{ dt_model.stdout | trim }}"
+          arch: "{{ ansible_facts.architecture }}"

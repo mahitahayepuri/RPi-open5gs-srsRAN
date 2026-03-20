@@ -1,0 +1,18 @@
+---
+# Install build dependencies for srsRAN 4G (srsUE) on the gNB Pi.
+# Most packages overlap with the gNB build deps and will already be present.
+- name: "srsUE | Install build dependencies"
+  hosts: ue
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: "Update apt cache"
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600    # skip if cache < 1 hour old
+
+    - name: "Install build dependencies"
+      ansible.builtin.apt:
+        name: "{{ srsue_build_deps }}"
+        state: present

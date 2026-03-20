@@ -1,0 +1,111 @@
+# Open5GS 5G core variables — applied to hosts in the [core] inventory group
+# Override per-host or via --extra-vars as needed
+
+# ---------------------------------------------------------------------------
+# Docker
+# ---------------------------------------------------------------------------
+docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+  - python3-docker
+docker_repo_arch: "arm64"
+
+# ---------------------------------------------------------------------------
+# Open5GS stack
+# ---------------------------------------------------------------------------
+# Pi 4 (Cortex-A72 / ARMv8.0-A): mongo 5.0+ crashes with SIGILL due to LSE atomics.
+# mongo 4.4.19+ also added an ARMv8.2-A requirement (SERVER-71772), so we use
+# the community-server image pinned to the last working release for ARMv8.0-A.
+open5gs_mongo_image_pi4: "mongodb/mongodb-community-server:4.4.3-ubuntu2004"
+open5gs_mongo_image_pi5: "mongo:7.0"
+open5gs_mongo_port: 27017
+
+# ---------------------------------------------------------------------------
+# WebUI (Docker container — built from open5gs source)
+# ---------------------------------------------------------------------------
+open5gs_webui_source_dir: "/usr/local/src/open5gs"
+open5gs_webui_port: 9999
+
+# ---------------------------------------------------------------------------
+# Open5GS native install (non-Docker)
+# ---------------------------------------------------------------------------
+
+# Installation method: "apt" (OBS packages) or "source" (compile from git)
+open5gs_install_method: "apt"
+
+# --- Apt install (OBS repository for Raspbian 13 / Trixie arm64) ----------
+open5gs_obs_key_url: >-
+  https://download.opensuse.org/repositories/home:/acetcom:/open5gs:/latest/Raspbian_13/Release.key
+open5gs_obs_repo_url: >-
+  https://download.opensuse.org/repositories/home:/acetcom:/open5gs:/latest/Raspbian_13/
+open5gs_obs_repo_name: "open5gs"
+
+# --- Source install --------------------------------------------------------
+open5gs_source_repo: "https://github.com/open5gs/open5gs"
+open5gs_source_version: "v2.7.7"          # git tag or branch
+open5gs_source_dir: "/usr/local/src/open5gs"
+open5gs_source_prefix: "/usr/local"        # meson --prefix
+open5gs_build_deps:
+  - python3-pip
+  - python3-setuptools
+  - python3-wheel
+  - ninja-build
+  - build-essential
+  - flex
+  - bison
+  - git
+  - cmake
+  - libsctp-dev
+  - libgnutls28-dev
+  - libgcrypt-dev
+  - libssl-dev
+  - libmongoc-dev
+  - libbson-dev
+  - libyaml-dev
+  - libnghttp2-dev
+  - libmicrohttpd-dev
+  - libcurl4-gnutls-dev
+  - libtins-dev
+  - libtalloc-dev
+  - meson
+
+# --- Common settings (both methods) ---------------------------------------
+open5gs_user: "open5gs"
+open5gs_group: "open5gs"
+
+# TUN device
+open5gs_tun_name: "ogstun"
+open5gs_tun_addr_v4: "10.45.0.1/16"
+open5gs_tun_addr_v6: "2001:db8:cafe::1/48"
+
+# UE subnet (used for NAT masquerade — derived from tun_addr_v4 above)
+open5gs_ue_pool_v4: "10.45.0.0/16"
+
+# ---------------------------------------------------------------------------
+# RAN-facing network (N2/N3 backhaul between core and gNB)
+# ---------------------------------------------------------------------------
+# This address is added as a secondary IP on the Pi's physical NIC.
+# The AMF (NGAP) and UPF (GTP-U) configs are patched to bind on this address
+# so the gNB on the other Pi can reach them.
+#
+# Override per inventory to avoid conflicts when multiple Pi pairs share a
+# LAN segment (e.g. 10.53.4.1 for Pi 4, 10.53.5.1 for Pi 5).
+open5gs_ran_addr: "10.53.1.1"
+open5gs_ran_prefix: 24
+
+# NF services to enable (5G SA core default set)
+open5gs_nf_services:
+  - open5gs-nrfd
+  - open5gs-scpd
+  - open5gs-amfd
+  - open5gs-smfd
+  - open5gs-upfd
+  - open5gs-ausfd
+  - open5gs-udmd
+  - open5gs-udrd
+  - open5gs-pcfd
+  - open5gs-nssfd
+  - open5gs-bsfd

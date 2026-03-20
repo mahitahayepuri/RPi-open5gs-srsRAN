@@ -1,0 +1,10 @@
+---
+- name: Preflight | Memory
+  hosts: rpi
+  gather_facts: true
+
+  tasks:
+    - name: Show total memory (MB)
+      ansible.builtin.debug:
+        msg:
+          mem_total_mb: "{{ ansible_facts.memtotal_mb }}"

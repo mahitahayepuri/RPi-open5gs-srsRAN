@@ -1,0 +1,6 @@
+---
+# Centralized preflight: import individual preflight playbooks (static)
+- import_playbook: model.yml
+- import_playbook: memory.yml
+- import_playbook: os_check.yml
+- import_playbook: verify_platform.yml

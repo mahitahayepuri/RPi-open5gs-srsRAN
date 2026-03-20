@@ -1,0 +1,117 @@
+# srsRAN gNB variables — applied to hosts in the [gnb] inventory group
+# Override per-host or via --extra-vars as needed
+
+# ---------------------------------------------------------------------------
+# srsRAN Project build-from-source settings
+# ---------------------------------------------------------------------------
+
+srsran_source_repo: "https://github.com/srsRAN/srsRAN_Project.git"
+srsran_source_version: "release_24_10_1"   # pinned for srsUE compat (see VERSION_PINNING.md)
+srsran_source_dir: "/usr/local/src/srsRAN_Project"
+srsran_install_prefix: "/usr/local"
+
+# Build parallelism -- auto-scaled by RAM (see compile.yml); lower this on
+# 4 GB Pis to avoid OOM during linking.
+srsran_build_jobs: 0                       # 0 = auto (RAM-aware)
+
+# Async timeout for the compilation step (seconds).
+# Pi 4 can take 2+ hours for a full build; Pi 5 ~15-30 min.
+srsran_build_timeout: 10800                # 3 hours
+
+# --- Build dependencies ----------------------------------------------------
+# Both ZMQ and UHD drivers are always compiled so that switching between
+# them is a runtime config change -- no recompile needed.
+srsran_build_deps:
+  - cmake
+  - make
+  - gcc
+  - g++
+  - pkg-config
+  - git
+  - libfftw3-dev
+  - libmbedtls-dev
+  - libsctp-dev
+  - libyaml-cpp-dev
+  - libgtest-dev
+  - libzmq3-dev
+  - libuhd-dev
+  - uhd-host
+
+srsran_build_deps_optional:
+  - ninja-build
+  - ccache
+  - libpcap-dev
+
+# --- CMake configuration ---------------------------------------------------
+
+# Build type: Release, RelWithDebInfo, Debug
+srsran_cmake_build_type: "Release"
+
+# Additional CMake flags (appended to the cmake command)
+srsran_cmake_extra_flags: ""
+
+# --- Runtime configuration -------------------------------------------------
+
+# Path for the deployed gNB config file
+srsran_gnb_config_path: "/etc/srsran"
+srsran_gnb_config_file: "gnb.yml"
+
+# Performance tuning (mirrors upstream scripts/srsran_performance)
+srsran_set_realtime_cap: true              # setcap cap_sys_nice on gnb binary
+srsran_cpu_governor: "performance"         # set CPU governor for real-time use
+srsran_disable_kms_polling: true           # disable DRM KMS polling to reduce CPU overhead
+srsran_tune_network_buffers: false         # set 32 MB net buffers (enable for Ethernet-connected USRPs)
+
+# --- gNB parameters (customize for your deployment) ------------------------
+srsran_gnb_id: 1
+srsran_gnb_id_bit_length: 22
+srsran_gnb_name: "srsgnb01"
+
+# AMF connection (point to your Open5GS AMF)
+# These addresses form the dedicated N2/N3 backhaul subnet between the Pis.
+# Each Pi gets the address as a secondary IP on its physical NIC (see network.yml).
+#
+# Override per inventory to avoid conflicts when multiple Pi pairs share a
+# LAN segment (e.g. 10.53.4.x for Pi 4, 10.53.5.x for Pi 5).
+srsran_amf_addr: "10.53.1.1"
+srsran_gnb_bind_addr: "10.53.1.2"
+srsran_ran_prefix: 24
+
+# Cell configuration
+srsran_cell_dl_arfcn: 368500               # NR-ARFCN → ~1842.5 MHz downlink (band n3)
+srsran_cell_band: 3
+srsran_cell_bandwidth_mhz: 10
+srsran_cell_common_scs: 15
+# PLMN and TAC are derived from the shared network identity in group_vars/all.yml.
+# Do not set these directly — change open5gs_mcc/open5gs_mnc/open5gs_tac in all.yml instead.
+srsran_cell_plmn: "{{ open5gs_mcc }}{{ open5gs_mnc }}"
+srsran_cell_tac: "{{ open5gs_tac }}"
+
+# RF driver: "zmq" for testing without hardware, "uhd" for USRP SDR.
+# Switching only requires changing this variable and re-running the playbook
+# (no recompile -- both drivers are always built in).
+srsran_rf_driver: "zmq"
+
+# --- ZMQ-specific RF settings (used when srsran_rf_driver == "zmq") --------
+srsran_zmq_tx_port: "tcp://127.0.0.1:2000"
+srsran_zmq_rx_port: "tcp://127.0.0.1:2001"
+
+# --- UHD-specific RF settings (used when srsran_rf_driver == "uhd") --------
+srsran_uhd_device_args: ""                 # e.g. "type=b200" (empty = auto-detect)
+srsran_uhd_clock: "internal"               # clock source: internal, external, gpsdo
+srsran_uhd_sync: "internal"                # time source: internal, external, gpsdo
+srsran_uhd_otw_format: "sc12"              # over-the-wire format (sc12 saves USB bandwidth)
+srsran_uhd_tx_gain: 50
+srsran_uhd_rx_gain: 60
+srsran_uhd_srate: 23.04                    # sample rate in MHz
+
+# ---------------------------------------------------------------------------
+# Metrics & Grafana dashboard
+# ---------------------------------------------------------------------------
+
+# gNB metrics endpoint (JSON metrics over TCP — Telegraf connects here)
+# In release_24_10_1 this is a simple JSON-over-TCP server, NOT WebSocket.
+# The remote_control WebSocket was introduced in release_25_10.
+srsran_metrics_enable: true                # enable JSON metrics endpoint
+srsran_metrics_bind_addr: "0.0.0.0"        # bind address for the metrics server
+srsran_metrics_port: 55555                 # TCP port for JSON metrics

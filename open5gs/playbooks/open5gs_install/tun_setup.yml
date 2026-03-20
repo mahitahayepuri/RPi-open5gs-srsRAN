@@ -1,0 +1,64 @@
+---
+- name: "Open5GS | Configure persistent TUN device (systemd-networkd)"
+  hosts: candidate:&core
+  become: true
+  gather_facts: false
+
+  tasks:
+    # systemd-networkd .netdev creates the TUN interface at boot
+    - name: "Create {{ open5gs_tun_name }} netdev unit"
+      ansible.builtin.copy:
+        dest: "/etc/systemd/network/99-{{ open5gs_tun_name }}.netdev"
+        mode: "0644"
+        content: |
+          [NetDev]
+          Name={{ open5gs_tun_name }}
+          Kind=tun
+      notify: restart networkd
+
+    - name: "Create {{ open5gs_tun_name }} network unit"
+      ansible.builtin.copy:
+        dest: "/etc/systemd/network/99-{{ open5gs_tun_name }}.network"
+        mode: "0644"
+        content: |
+          [Match]
+          Name={{ open5gs_tun_name }}
+
+          [Network]
+          Address={{ open5gs_tun_addr_v4 }}
+          Address={{ open5gs_tun_addr_v6 }}
+      notify: restart networkd
+
+    - name: "Enable systemd-networkd"
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        enabled: true
+        state: started
+
+    # Raspberry Pi OS Trixie may run NetworkManager alongside systemd-networkd.
+    # Tell NM to leave the TUN device alone so the two don't fight.
+    - name: "Check if NetworkManager is present"
+      ansible.builtin.stat:
+        path: /etc/NetworkManager
+      register: _nm_dir
+
+    - name: "Tell NetworkManager to ignore {{ open5gs_tun_name }}"
+      ansible.builtin.copy:
+        dest: "/etc/NetworkManager/conf.d/99-ignore-{{ open5gs_tun_name }}.conf"
+        mode: "0644"
+        content: |
+          [keyfile]
+          unmanaged-devices=interface-name:{{ open5gs_tun_name }}
+      notify: reload networkmanager
+      when: _nm_dir.stat.isdir is defined and _nm_dir.stat.isdir
+
+  handlers:
+    - name: restart networkd
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        state: restarted
+
+    - name: reload networkmanager
+      ansible.builtin.systemd:
+        name: NetworkManager
+        state: reloaded

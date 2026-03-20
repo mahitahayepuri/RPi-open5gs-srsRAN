@@ -1,0 +1,41 @@
+---
+- name: "Open5GS | Run MongoDB (Docker)"
+  hosts: candidate:&core
+  become: true
+  gather_facts: true
+
+  tasks:
+    # Pi 4 (ARMv8.0-A) maxes out at MongoDB 4.4; Pi 5 (ARMv8.2-A) supports 7.0+.
+    - name: "Select MongoDB image based on Pi model"
+      ansible.builtin.set_fact:
+        _mongo_image: >-
+          {{ (rpi_model is match('^Raspberry Pi 5'))
+             | ternary(open5gs_mongo_image_pi5, open5gs_mongo_image_pi4) }}
+
+    - name: "Create MongoDB data volume"
+      ansible.builtin.command: docker volume create open5gs_mongodb_data
+      register: _vol_create
+      changed_when: "'open5gs_mongodb_data' in _vol_create.stdout"
+
+    - name: "Check if MongoDB container already exists"
+      ansible.builtin.command: docker ps -a --filter name=^open5gs-mongodb$ --format '{{ '{{' }}.Names{{ '}}' }}'
+      register: _mongo_exists
+      changed_when: false
+
+    - name: "Start MongoDB container"
+      ansible.builtin.shell: |
+        docker run -d \
+          --name open5gs-mongodb \
+          -p 127.0.0.1:{{ open5gs_mongo_port }}:27017 \
+          -v open5gs_mongodb_data:/data/db \
+          --restart unless-stopped \
+          {{ _mongo_image }} \
+          --bind_ip_all
+      when: _mongo_exists.stdout | trim == ""
+
+    - name: "Wait for MongoDB to accept connections"
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ open5gs_mongo_port }}"
+        delay: 3          # give the container time to initialise before first probe
+        timeout: 30       # MongoDB on Pi typically starts in <10s; 30s is generous

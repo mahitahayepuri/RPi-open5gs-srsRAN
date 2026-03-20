@@ -1,0 +1,190 @@
+---
+- name: "Open5GS | Configure RAN-facing network, IP forwarding, and NAT"
+  hosts: candidate:&core
+  become: true
+  gather_facts: true
+
+  tasks:
+    # --- RAN-facing secondary IP (N2/N3 backhaul) --------------------------
+    # Adds the core's RAN address as a secondary IP on the physical NIC so
+    # the gNB on the other Pi can reach AMF (NGAP) and UPF (GTP-U).
+
+    - name: "Deploy systemd service for RAN backhaul address"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/open5gs-ran-addr.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Open5GS RAN backhaul address ({{ open5gs_ran_addr }}/{{ open5gs_ran_prefix }})
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=-/sbin/ip addr add {{ open5gs_ran_addr }}/{{ open5gs_ran_prefix }} dev {{ ansible_default_ipv4.interface }}
+          ExecStop=-/sbin/ip addr del {{ open5gs_ran_addr }}/{{ open5gs_ran_prefix }} dev {{ ansible_default_ipv4.interface }}
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart ran-addr
+
+    - name: "Enable and start RAN address service"
+      ansible.builtin.systemd:
+        name: open5gs-ran-addr
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    # --- IP forwarding (required for UE internet access via ogstun) --------
+
+    - name: "Enable IPv4 forwarding"
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        sysctl_set: true
+        reload: true
+
+    - name: "Enable IPv6 forwarding"
+      ansible.posix.sysctl:
+        name: net.ipv6.conf.all.forwarding
+        value: "1"
+        sysctl_set: true
+        reload: true
+
+    # --- NAT masquerade for UE traffic -------------------------------------
+    # Without this, UE traffic from ogstun (10.45.0.0/16) has no route back
+    # from the internet.  Masquerade rewrites the source to the Pi's
+    # outgoing address.
+
+    - name: "Ensure nftables is installed"
+      ansible.builtin.apt:
+        name: nftables
+        state: present
+
+    - name: "Deploy Open5GS NAT rules (nftables)"
+      ansible.builtin.copy:
+        dest: /etc/open5gs/nat.nft
+        mode: "0644"
+        content: |
+          # Open5GS UE traffic NAT — deployed by Ansible
+          # Masquerade UE IPv4 traffic leaving via any interface except ogstun
+          table ip open5gs {
+            chain postrouting {
+              type nat hook postrouting priority srcnat; policy accept;
+              oifname != "{{ open5gs_tun_name }}" ip saddr {{ open5gs_ue_pool_v4 }} masquerade
+            }
+          }
+      notify: reload nat
+
+    - name: "Deploy systemd service for NAT rules"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/open5gs-nat.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Open5GS UE traffic NAT (nftables)
+          After=network-online.target nftables.service
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/sbin/nft -f /etc/open5gs/nat.nft
+          ExecReload=/usr/sbin/nft -f /etc/open5gs/nat.nft
+          ExecStop=-/usr/sbin/nft delete table ip open5gs
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: reload nat
+
+    - name: "Enable and start NAT service"
+      ansible.builtin.systemd:
+        name: open5gs-nat
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    # --- Patch Open5GS configs using yq (YAML-aware editing) ----------------
+    # The default configs bind NGAP and GTP-U on loopback addresses.
+    # For cross-Pi communication, these must use the RAN-facing address.
+    # SBI (inter-NF) and PFCP (SMF <-> UPF) stay on loopback since both
+    # endpoints are on the same Pi.
+    #
+    # yq edits YAML by key path rather than regex, so these patches survive
+    # upstream indentation or structural changes. The only breaking change
+    # would be if Open5GS renamed the YAML keys themselves.
+    # yq is installed by pi_setup.yml (common playbooks).
+
+    - name: "Patch AMF config — bind NGAP on RAN address"
+      ansible.builtin.command:
+        cmd: >-
+          yq -i '.amf.ngap.server[0].address = "{{ open5gs_ran_addr }}"'
+          /etc/open5gs/amf.yaml
+      register: _amf_ngap
+      changed_when: true
+      notify: restart open5gs-stack
+
+    - name: "Patch UPF config — bind GTP-U on RAN address"
+      ansible.builtin.command:
+        cmd: >-
+          yq -i '.upf.gtpu.server[0].address = "{{ open5gs_ran_addr }}"'
+          /etc/open5gs/upf.yaml
+      register: _upf_gtpu
+      changed_when: true
+      notify: restart open5gs-stack
+
+    # --- Patch AMF PLMN and TAC to match the gNB configuration ---------------
+    # The upstream default is MCC=999/MNC=70/TAC=1 (IANA test network).
+    # The gNB's PLMN and TAC are derived from group_vars/all.yml. If these
+    # don't match, the AMF rejects the NGAP association from the gNB.
+
+    - name: "Patch AMF config — set PLMN and TAC"
+      ansible.builtin.command:
+        cmd: >-
+          yq -i '
+            .amf.guami[0].plmn_id.mcc = "{{ open5gs_mcc }}" |
+            .amf.guami[0].plmn_id.mnc = "{{ open5gs_mnc }}" |
+            .amf.tai[0].plmn_id.mcc = "{{ open5gs_mcc }}" |
+            .amf.tai[0].plmn_id.mnc = "{{ open5gs_mnc }}" |
+            .amf.tai[0].tac = {{ open5gs_tac }} |
+            .amf.plmn_support[0].plmn_id.mcc = "{{ open5gs_mcc }}" |
+            .amf.plmn_support[0].plmn_id.mnc = "{{ open5gs_mnc }}"
+          ' /etc/open5gs/amf.yaml
+      changed_when: true
+      notify: restart open5gs-stack
+
+    # --- Patch NRF serving PLMN -----------------------------------------------
+    # The NRF must know its own PLMN so it can perform local NF discovery
+    # instead of attempting inter-PLMN routing via SEPP.  Without this,
+    # authentication requests fail with "No SEPP" / "NF-Discover failed [504]".
+    - name: "Patch NRF config — set serving PLMN"
+      ansible.builtin.command:
+        cmd: >-
+          yq -i '
+            .nrf.serving[0].plmn_id.mcc = "{{ open5gs_mcc }}" |
+            .nrf.serving[0].plmn_id.mnc = "{{ open5gs_mnc }}"
+          ' /etc/open5gs/nrf.yaml
+      changed_when: true
+      notify: restart open5gs-stack
+
+  handlers:
+    - name: restart ran-addr
+      ansible.builtin.systemd:
+        name: open5gs-ran-addr
+        state: restarted
+        daemon_reload: true
+
+    - name: reload nat
+      ansible.builtin.systemd:
+        name: open5gs-nat
+        state: restarted
+
+    - name: restart open5gs-stack
+      # Only restart if the target is already running (first run: services.yml
+      # hasn't executed yet, so the target doesn't exist).
+      ansible.builtin.shell: |
+        systemctl is-active --quiet open5gs-stack.target && \
+          systemctl restart open5gs-stack.target || true
+      args:
+        executable: /bin/bash

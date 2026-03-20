@@ -1,0 +1,115 @@
+---
+# Switch Open5GS NFs from built-in file logging to
+# stdout → journald → rsyslog → /var/log/open5gs/<nf>.log
+#
+# This gives us:
+#   - journalctl -u open5gs-amfd   (live streaming)
+#   - /var/log/open5gs/amf.log     (persistent, rotated by logrotate)
+#   - Consistent approach with the srsRAN gNB log pipeline
+#
+# rsyslog is installed by common/pi_setup.yml before this runs.
+
+- name: "Open5GS | Configure rsyslog-based NF logging"
+  hosts: candidate:&core
+  become: true
+  gather_facts: false
+
+  tasks:
+    # --- Remove built-in file logger from each NF config --------------------
+    # Without the logger.file key the NFs log to stderr, which systemd
+    # captures into journald.  rsyslog then routes from journald to files.
+    # The built-in logger wrote to /var/log/open5gs/<nf>.log (e.g. amf.log);
+    # we reuse those same filenames for the rsyslog output.
+
+    - name: "Patch NF configs — remove built-in file logger"
+      ansible.builtin.command:
+        cmd: >-
+          yq -i 'del(.logger)' /etc/open5gs/{{ item }}.yaml
+      loop:
+        - nrf
+        - scp
+        - amf
+        - smf
+        - upf
+        - ausf
+        - udm
+        - udr
+        - pcf
+        - nssf
+        - bsf
+      changed_when: true
+
+    # Remove stale log files left by the built-in logger or by an older
+    # rsyslog config that used the daemon suffix (e.g. amfd.log).
+    - name: "Find stale *d.log files from previous rsyslog config"
+      ansible.builtin.find:
+        paths: /var/log/open5gs
+        patterns: "*d.log"
+      register: _stale_logs
+
+    - name: "Remove stale *d.log files"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ _stale_logs.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      when: _stale_logs.files | length > 0
+
+    # --- Create log directory ------------------------------------------------
+
+    - name: "Create /var/log/open5gs directory"
+      ansible.builtin.file:
+        path: /var/log/open5gs
+        state: directory
+        mode: "0755"
+
+    # --- Deploy rsyslog config -----------------------------------------------
+    # Each NF runs as a separate systemd service whose SyslogIdentifier
+    # matches the service name (e.g. open5gs-amfd).  rsyslog reads from
+    # journald (imjournal) and routes by $programname.  The daemon suffix
+    # 'd' is stripped from the filename so we get amf.log, not amfd.log.
+
+    - name: "Deploy rsyslog config for Open5GS NF log splitting"
+      ansible.builtin.copy:
+        dest: /etc/rsyslog.d/30-open5gs.conf
+        mode: "0644"
+        content: |
+          # Open5GS per-NF log splitting — deployed by Ansible
+          # Routes each NF's journal output to a dedicated log file.
+          # Service names end in 'd' (daemon), but filenames do not
+          # (e.g. open5gs-amfd → amf.log).
+
+          {% for nf in open5gs_nf_services %}
+          {% set short = nf | regex_replace('^open5gs-', '') %}
+          {% set fname = short | regex_replace('d$', '') %}
+          if $programname == "{{ short }}" or
+             $programname == "{{ nf }}" then {
+            action(type="omfile" file="/var/log/open5gs/{{ fname }}.log")
+            stop
+          }
+          {% endfor %}
+      notify: restart rsyslog
+
+    # --- Deploy logrotate config ---------------------------------------------
+
+    - name: "Deploy logrotate config for Open5GS logs"
+      ansible.builtin.copy:
+        dest: /etc/logrotate.d/open5gs
+        mode: "0644"
+        content: |
+          /var/log/open5gs/*.log {
+            daily
+            rotate 7
+            missingok
+            notifempty
+            compress
+            delaycompress
+            copytruncate
+          }
+
+  handlers:
+    - name: restart rsyslog
+      ansible.builtin.systemd:
+        name: rsyslog
+        state: restarted

@@ -1,0 +1,48 @@
+# srsUE (software UE) variables — applied to hosts in the [ue] inventory group
+# The UE runs on the same Pi as the gNB (ZMQ uses localhost sockets).
+
+# ---------------------------------------------------------------------------
+# srsRAN 4G build settings (srsUE comes from the srsRAN 4G project)
+# ---------------------------------------------------------------------------
+srsue_source_repo: "https://github.com/srsRAN/srsRAN_4G.git"
+srsue_source_version: "release_23_11"      # pinned for gNB compat (see VERSION_PINNING.md)
+srsue_source_dir: "/usr/local/src/srsRAN_4G"
+
+srsue_build_timeout: 7200                  # 2 hours (async timeout)
+
+srsue_build_deps:
+  - cmake
+  - make
+  - gcc
+  - g++
+  - pkg-config
+  - git
+  - libfftw3-dev
+  - libmbedtls-dev
+  - libsctp-dev
+  - libconfig++-dev
+  - libzmq3-dev
+  - libboost-program-options-dev
+
+# ---------------------------------------------------------------------------
+# srsUE configuration
+# ---------------------------------------------------------------------------
+srsue_config_dir: "/etc/srsran_4g"
+srsue_config_file: "ue.conf"
+
+# RF — in ZMQ mode, UE rx = gNB tx and vice versa (crossover)
+srsue_rf_device: "zmq"
+srsue_zmq_tx_port: "tcp://127.0.0.1:2001"   # UE tx = gNB rx
+srsue_zmq_rx_port: "tcp://127.0.0.1:2000"   # UE rx = gNB tx
+srsue_srate: "11.52e6"
+srsue_tx_gain: 50
+srsue_rx_gain: 40
+
+# Radio — must match the gNB cell configuration
+srsue_nr_bands: 3                            # matches srsran_cell_band
+srsue_dl_nr_arfcn: 368500                    # must match srsran_cell_dl_arfcn
+srsue_ssb_nr_arfcn: 367930                   # SSB ARFCN broadcast by the gNB (band n3, 10 MHz)
+
+# Network namespace for the UE TUN interface (keeps UE traffic isolated)
+srsue_netns: "ue1"
+srsue_tun_name: "tun_srsue"

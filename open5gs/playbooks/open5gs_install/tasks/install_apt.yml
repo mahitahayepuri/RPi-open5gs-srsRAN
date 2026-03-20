@@ -1,0 +1,63 @@
+---
+# Task file: install Open5GS from OBS apt repository (Raspbian 13 arm64)
+# Included by install.yml when open5gs_install_method == "apt"
+
+- name: "apt | Download OBS repository GPG key"
+  ansible.builtin.get_url:
+    url: "{{ open5gs_obs_key_url }}"
+    dest: /usr/share/keyrings/open5gs-obs.gpg.armored
+    mode: "0644"
+  register: obs_key_download
+
+- name: "apt | De-armor OBS GPG key"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    gpg --dearmor \
+      < /usr/share/keyrings/open5gs-obs.gpg.armored \
+      > /usr/share/keyrings/open5gs-obs.gpg
+  args:
+    executable: /bin/bash
+    creates: /usr/share/keyrings/open5gs-obs.gpg
+
+- name: "apt | Add OBS repository"
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/usr/share/keyrings/open5gs-obs.gpg]
+      {{ open5gs_obs_repo_url }} ./
+    filename: "{{ open5gs_obs_repo_name }}"
+    state: present
+
+- name: "apt | Create open5gs system group"
+  ansible.builtin.group:
+    name: "{{ open5gs_group }}"
+    system: true
+
+- name: "apt | Create open5gs system user"
+  ansible.builtin.user:
+    name: "{{ open5gs_user }}"
+    group: "{{ open5gs_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+    
+- name: "apt | Install 5G SA NF packages"
+  ansible.builtin.apt:
+    name:
+      - open5gs-common
+      - open5gs-nrf
+      - open5gs-scp
+      - open5gs-amf
+      - open5gs-smf
+      - open5gs-upf
+      - open5gs-ausf
+      - open5gs-udm
+      - open5gs-udr
+      - open5gs-pcf
+      - open5gs-nssf
+      - open5gs-bsf
+    state: present
+    update_cache: true
+  # We install individual NF packages rather than the `open5gs` meta-package
+  # because the meta-package pulls in open5gs-hss, which depends on a native
+  # mongodb-org/mongodb apt package.  We run MongoDB in Docker instead.

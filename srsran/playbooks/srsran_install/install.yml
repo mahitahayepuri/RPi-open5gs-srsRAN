@@ -1,0 +1,316 @@
+---
+- name: "srsRAN | Install and configure gNB"
+  hosts: candidate:&gnb
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "Install srsRAN binaries"
+      ansible.builtin.command:
+        cmd: make install
+        chdir: "{{ srsran_source_dir }}/build"
+      changed_when: true
+
+    - name: "Run ldconfig"
+      ansible.builtin.command: ldconfig
+      changed_when: true
+
+    # Ensure the pi user can access USB SDR devices without root.
+    # The uhd-host package installs its own rules, but this covers
+    # common Ettus USB IDs explicitly in case the package rules are
+    # absent or incomplete.
+    - name: "Deploy udev rules for USB SDR devices"
+      ansible.builtin.copy:
+        dest: /etc/udev/rules.d/99-usrp.rules
+        mode: "0644"
+        content: |
+          # Ettus Research USRP B200/B210
+          SUBSYSTEM=="usb", ATTR{idVendor}=="2500", ATTR{idProduct}=="0020", MODE="0666"
+          SUBSYSTEM=="usb", ATTR{idVendor}=="2500", ATTR{idProduct}=="0021", MODE="0666"
+          SUBSYSTEM=="usb", ATTR{idVendor}=="2500", ATTR{idProduct}=="0022", MODE="0666"
+      notify: reload udev
+
+    # Grant real-time scheduling capability so the gNB can run without root
+    - name: "Set real-time capability on gnb binary"
+      community.general.capabilities:
+        path: "{{ srsran_install_prefix }}/bin/gnb"
+        capability: cap_sys_nice=ep
+        state: present
+      when: srsran_set_realtime_cap | bool
+
+    # --- Performance tuning (mirrors upstream scripts/srsran_performance) ---
+    # linux-cpupower is installed by build_deps.yml (before compile).
+
+    - name: "Deploy cpupower-governor systemd oneshot service"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/cpupower-governor.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Set CPU governor to {{ srsran_cpu_governor }}
+          After=multi-user.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/cpupower frequency-set -g {{ srsran_cpu_governor }}
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: reload and enable cpupower-governor
+      when: srsran_cpu_governor == "performance"
+
+    - name: "Apply CPU governor immediately"
+      ansible.builtin.shell: |
+        for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+          echo {{ srsran_cpu_governor }} > "$cpu"
+        done
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when: srsran_cpu_governor == "performance"
+
+    - name: "Disable DRM KMS polling (persistent via modprobe.d)"
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/srsran-drm-kms.conf
+        mode: "0644"
+        content: |
+          options drm_kms_helper poll=N
+      when: srsran_disable_kms_polling | bool
+
+    - name: "Disable DRM KMS polling (apply immediately)"
+      ansible.builtin.shell: |
+        if [ -f /sys/module/drm_kms_helper/parameters/poll ]; then
+          echo N > /sys/module/drm_kms_helper/parameters/poll
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when: srsran_disable_kms_polling | bool
+
+    - name: "Tune network buffers for USRP Ethernet transport"
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_set: true
+        reload: true
+      loop:
+        - { key: "net.core.wmem_max",     value: "33554432" }   # 32 MB
+        - { key: "net.core.rmem_max",     value: "33554432" }   # 32 MB
+        - { key: "net.core.wmem_default", value: "33554432" }   # 32 MB
+        - { key: "net.core.rmem_default", value: "33554432" }   # 32 MB
+      when: srsran_tune_network_buffers | bool
+
+    - name: "Create srsRAN config directory"
+      ansible.builtin.file:
+        path: "{{ srsran_gnb_config_path }}"
+        state: directory
+        mode: "0755"
+
+    - name: "Create log directory"
+      ansible.builtin.file:
+        path: /var/log/srsran
+        state: directory
+        mode: "0755"
+
+    - name: "Deploy gNB configuration file"
+      ansible.builtin.copy:
+        dest: "{{ srsran_gnb_config_path }}/{{ srsran_gnb_config_file }}"
+        mode: "0644"
+        content: |
+          gnb_id: {{ srsran_gnb_id }}
+          gnb_id_bit_length: {{ srsran_gnb_id_bit_length }}
+          ran_node_name: {{ srsran_gnb_name }}
+
+          cu_cp:
+            amf:
+              addr: {{ srsran_amf_addr }}
+              bind_addr: {{ srsran_gnb_bind_addr }}
+              supported_tracking_areas:
+                - tac: {{ srsran_cell_tac }}
+                  plmn_list:
+                    - plmn: "{{ srsran_cell_plmn }}"
+                      tai_slice_support_list:
+                        - sst: 1
+
+          ru_sdr:
+            device_driver: {{ srsran_rf_driver }}
+          {% if srsran_rf_driver == 'zmq' %}
+            device_args: tx_port={{ srsran_zmq_tx_port }},rx_port={{ srsran_zmq_rx_port }},base_srate=11.52e6
+            srate: 11.52
+          {# 11.52 MHz = minimum sample rate for 10 MHz channel BW with 15 kHz SCS #}
+            tx_gain: 75
+            rx_gain: 75
+          {% elif srsran_rf_driver == 'uhd' %}
+          {% if srsran_uhd_device_args %}
+            device_args: {{ srsran_uhd_device_args }}
+          {% endif %}
+            clock: {{ srsran_uhd_clock }}
+            sync: {{ srsran_uhd_sync }}
+            otw_format: {{ srsran_uhd_otw_format }}
+            srate: {{ srsran_uhd_srate }}
+            tx_gain: {{ srsran_uhd_tx_gain }}
+            rx_gain: {{ srsran_uhd_rx_gain }}
+          {% endif %}
+
+          cell_cfg:
+            dl_arfcn: {{ srsran_cell_dl_arfcn }}
+            band: {{ srsran_cell_band }}
+            channel_bandwidth_MHz: {{ srsran_cell_bandwidth_mhz }}
+            common_scs: {{ srsran_cell_common_scs }}
+            plmn: "{{ srsran_cell_plmn }}"
+            tac: {{ srsran_cell_tac }}
+          {% if srsran_rf_driver == 'zmq' %}
+            # PDCCH/PRACH parameters required for srsUE compatibility
+            pdcch:
+              dedicated:
+                ss2_type: common
+                dci_format_0_1_and_1_1: false
+              common:
+                ss0_index: 0
+            prach:
+              prach_config_index: 1
+          {% endif %}
+
+          log:
+            filename: stdout
+            all_level: info
+          # Logs go to stdout → journald (systemd captures it).
+          # rsyslog splits by component tag into /var/log/srsran/cucp.log, cuup.log, du.log
+
+          metrics:
+            addr: {{ srsran_metrics_bind_addr }}
+          {% if srsran_metrics_enable | bool %}
+            port: {{ srsran_metrics_port | default(55555) }}
+          {% endif %}
+
+    - name: "Deploy gNB systemd service"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/srsran-gnb.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=srsRAN Project gNB
+          After=network-online.target srsran-ran-addr.service
+          Wants=network-online.target
+          Requires=srsran-ran-addr.service
+
+          [Service]
+          Type=simple
+          ExecStart={{ srsran_install_prefix }}/bin/gnb -c {{ srsran_gnb_config_path }}/{{ srsran_gnb_config_file }}
+          SyslogIdentifier=srsran-gnb
+          StandardOutput=journal
+          StandardError=journal
+          Restart=on-failure
+          RestartSec=5
+          LimitRTPRIO=99
+          LimitMEMLOCK=infinity
+          # RTPRIO=99: allow real-time thread priority up to max (needed for PHY)
+          # MEMLOCK=infinity: prevent page faults in the real-time signal path
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: reload systemd
+
+    - name: "Enable gNB service (do not start -- needs AMF connectivity first)"
+      ansible.builtin.systemd:
+        name: srsran-gnb
+        enabled: true
+        daemon_reload: true
+
+    - name: "Deploy srsran_check health-check script"
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../tools/check_status.sh"
+        dest: /usr/local/bin/srsran_check
+        mode: "0755"
+
+    # --- Per-component log splitting via rsyslog ------------------------------
+    # The gNB logs to stdout → journald (single stream, all components).
+    # rsyslog reads from journald and splits into separate files by the
+    # component tag in each log line (e.g. [RRC], [MAC], [NGAP]).
+    # This gives students CU-CP, CU-UP, and DU logs in separate files
+    # while journalctl -u srsran-gnb still shows the full combined stream.
+    # rsyslog itself is installed by common/pi_setup.yml.
+
+    - name: "Deploy rsyslog config for gNB log splitting"
+      ansible.builtin.copy:
+        dest: /etc/rsyslog.d/30-srsran-gnb.conf
+        mode: "0644"
+        content: |
+          # srsRAN gNB per-component log splitting — deployed by Ansible
+          # Reads from journald (srsran-gnb unit) and routes to separate files
+          # based on the component tag in square brackets.
+
+          if $programname == "srsran-gnb" then {
+
+            # CU-CP: control-plane signalling (RRC, NGAP, F1AP-C, E1AP)
+            if $msg contains "[RRC" or
+               $msg contains "[NGAP" or
+               $msg contains "[F1AP" or
+               $msg contains "[E1AP" or
+               $msg contains "[CU-CP" then {
+              action(type="omfile" file="/var/log/srsran/cucp.log")
+            }
+
+            # CU-UP: user-plane data (PDCP, SDAP, GTP-U, E1AP)
+            if $msg contains "[PDCP" or
+               $msg contains "[SDAP" or
+               $msg contains "[GTPU" or
+               $msg contains "[CU-UP" or
+               $msg contains "[F1-U" then {
+              action(type="omfile" file="/var/log/srsran/cuup.log")
+            }
+
+            # DU: radio interface (MAC, RLC, PHY, scheduler)
+            if $msg contains "[MAC" or
+               $msg contains "[RLC" or
+               $msg contains "[PHY" or
+               $msg contains "[DU" or
+               $msg contains "[SCHED" then {
+              action(type="omfile" file="/var/log/srsran/du.log")
+            }
+
+            # Combined log (all components, for reference)
+            action(type="omfile" file="/var/log/srsran/gnb.log")
+
+            # Stop processing — don't duplicate into /var/log/syslog
+            stop
+          }
+      notify: restart rsyslog
+
+    - name: "Deploy logrotate config for gNB logs"
+      ansible.builtin.copy:
+        dest: /etc/logrotate.d/srsran-gnb
+        mode: "0644"
+        content: |
+          /var/log/srsran/*.log {
+            daily
+            rotate 7
+            missingok
+            notifempty
+            compress
+            delaycompress
+            copytruncate
+          }
+
+  handlers:
+    - name: reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: reload udev
+      ansible.builtin.shell: udevadm control --reload-rules && udevadm trigger
+      args:
+        executable: /bin/bash
+
+    - name: reload and enable cpupower-governor
+      ansible.builtin.systemd:
+        name: cpupower-governor
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: restart rsyslog
+      ansible.builtin.systemd:
+        name: rsyslog
+        state: restarted

@@ -1,0 +1,205 @@
+---
+- name: "Pi Setup | Harden for headless server use"
+  hosts: rpi
+  gather_facts: true
+  become: true
+
+  vars:
+    boot_config: /boot/firmware/config.txt        
+    # Bookworm/Trixie path (documented)
+    # [2](https://archive.raspberrypi.com/README.txt)
+    wifi_overlay_generic: "dtoverlay=disable-wifi"
+    bt_overlay_generic:   "dtoverlay=disable-bt"
+    wifi_overlay_pi5:     "dtoverlay=disable-wifi-pi5"
+    bt_overlay_pi5:       "dtoverlay=disable-bt-pi5"
+
+  tasks:
+    # --- Disable cloud-init ------------------------------------------------
+    # Recent Raspberry Pi OS images ship cloud-init, which can overwrite
+    # network configuration and other settings on boot.  Touching this
+    # sentinel file prevents cloud-init from running.
+    # https://forums.raspberrypi.com/viewtopic.php?t=394462
+
+    - name: "Ensure /etc/cloud directory exists"
+      ansible.builtin.file:
+        path: /etc/cloud
+        state: directory
+        mode: "0755"
+
+    - name: "Disable cloud-init (touch sentinel file)"
+      ansible.builtin.file:
+        path: /etc/cloud/cloud-init.disabled
+        state: touch
+        mode: "0644"
+        modification_time: preserve
+        access_time: preserve
+
+    # --- Disable onboard Wi-Fi & Bluetooth via boot overlays ---------------
+
+    - name: "Determine Pi 5 from normalized model fact (set elsewhere)"
+      ansible.builtin.set_fact:
+        is_pi5: "{{ (rpi_model | default('')) is match('^Raspberry Pi 5') }}"
+
+    - name: "Ensure Wi-Fi disable overlay present"
+      ansible.builtin.lineinfile:
+        path: "{{ boot_config }}"
+        regexp: '^\s*dtoverlay=(disable-wifi|disable-wifi-pi5)\s*$'
+        line: "{{ (is_pi5 | default(false)) | ternary(wifi_overlay_pi5, wifi_overlay_generic) }}"
+        state: present
+        insertafter: EOF
+        create: true
+      register: wifi_overlay
+      # Overlay names are listed in overlays/README
+      # [1](https://www.raspberrypi.org/documentation/usage/)
+
+    - name: "Ensure Bluetooth disable overlay present"
+      ansible.builtin.lineinfile:
+        path: "{{ boot_config }}"
+        regexp: '^\s*dtoverlay=(disable-bt|disable-bt-pi5)\s*$'
+        line: "{{ (is_pi5 | default(false)) | ternary(bt_overlay_pi5, bt_overlay_generic) }}"
+        state: present
+        insertafter: EOF
+      register: bt_overlay
+      # Overlay names are listed in overlays/README
+      # [1](https://www.raspberrypi.org/documentation/usage/)
+
+    - name: "Reboot to apply overlay changes"
+      ansible.builtin.reboot:
+        msg: "Reboot to apply Wi-Fi/BT disable overlays"
+        reboot_timeout: 600
+      when: wifi_overlay is changed or bt_overlay is changed
+      # Reboot required for config.txt changes to take effect (config.txt is processed at boot) 
+      # [2](https://archive.raspberrypi.com/README.txt)
+
+    # --- Full system upgrade -------------------------------------------------
+    # Ensure all packages are up to date before installing any new software.
+    # This also pulls in security fixes (e.g. cloud-init removal).
+
+    - name: "Update apt cache"
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: "Upgrade all packages (dist-upgrade)"
+      ansible.builtin.apt:
+        upgrade: dist
+      register: sys_upgrade
+
+    - name: "Reboot after system upgrade (if packages were upgraded)"
+      ansible.builtin.reboot:
+        msg: "Reboot after apt dist-upgrade"
+        reboot_timeout: 600
+      when: sys_upgrade is changed
+
+    # --- Disable unused interfaces via raspi-config ------------------------
+    # raspi-config nonint convention: 0 = enable, 1 = disable (counter-intuitive)
+    # Interface toggles via raspi-config CLI documented by Raspberry Pi
+    # [3](https://linuxvox.com/blog/linux-device-tree/)
+
+    - name: "Disable VNC (raspi-config nonint do_vnc 1)"
+      ansible.builtin.command: raspi-config nonint do_vnc 1
+      register: rc_vnc
+      changed_when: rc_vnc.rc == 0
+      failed_when: false
+
+    - name: "Disable SPI (raspi-config nonint do_spi 1)"
+      ansible.builtin.command: raspi-config nonint do_spi 1
+      register: rc_spi
+      changed_when: rc_spi.rc == 0
+      failed_when: false
+
+    - name: "Disable I2C (raspi-config nonint do_i2c 1)"
+      ansible.builtin.command: raspi-config nonint do_i2c 1
+      register: rc_i2c
+      changed_when: rc_i2c.rc == 0
+      failed_when: false
+
+    - name: "Disable 1-Wire (raspi-config nonint do_onewire 1)"
+      ansible.builtin.command: raspi-config nonint do_onewire 1
+      register: rc_onewire
+      changed_when: rc_onewire.rc == 0
+      failed_when: false
+
+    # --- Shell quality-of-life ------------------------------------------------
+
+    - name: "Enable bash history timestamps"
+      ansible.builtin.copy:
+        dest: /etc/profile.d/histtimeformat.sh
+        mode: "0644"
+        content: |
+          export HISTTIMEFORMAT="%F %T  "
+
+    # --- Tools ----------------------------------------------------------------
+
+    - name: "Install rsyslog (not shipped by default on Trixie)"
+      ansible.builtin.apt:
+        name: rsyslog
+        state: present
+
+    - name: "Install yq (YAML-aware CLI editor)"
+      ansible.builtin.get_url:
+        url: "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_arm64"
+        dest: /usr/local/bin/yq
+        mode: "0755"
+
+    # --- Pi hardware monitor (temperature, throttle, load, memory) ----------
+    # See PI_MONITOR.md for full documentation.
+
+    - name: "Deploy pi_monitor script"
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../tools/pi_monitor.sh"
+        dest: /usr/local/bin/pi_monitor
+        mode: "0755"
+      when: pi_monitor_enabled | bool
+
+    - name: "Deploy pi-monitor systemd service"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pi-monitor.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Pi hardware monitor (temp, throttle, load, memory)
+          After=multi-user.target
+
+          [Service]
+          Type=simple
+          Environment=PI_MONITOR_INTERVAL={{ pi_monitor_interval }}
+          ExecStart=/usr/local/bin/pi_monitor
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: reload and enable pi-monitor
+      when: pi_monitor_enabled | bool
+
+    - name: "Deploy logrotate config for pi-monitor"
+      ansible.builtin.copy:
+        dest: /etc/logrotate.d/pi-monitor
+        mode: "0644"
+        content: |
+          /var/log/pi-monitor.log {
+            daily
+            rotate 7
+            missingok
+            notifempty
+            compress
+            delaycompress
+            copytruncate
+          }
+      when: pi_monitor_enabled | bool
+
+    - name: "Enable and start pi-monitor service"
+      ansible.builtin.systemd:
+        name: pi-monitor
+        daemon_reload: true
+        enabled: true
+        state: started
+      when: pi_monitor_enabled | bool
+
+  handlers:
+    - name: reload and enable pi-monitor
+      ansible.builtin.systemd:
+        name: pi-monitor
+        daemon_reload: true
+        enabled: true
+        state: restarted

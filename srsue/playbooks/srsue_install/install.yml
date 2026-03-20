@@ -1,0 +1,95 @@
+---
+# Install srsUE binary and deploy its configuration file.
+- name: "srsUE | Install and configure"
+  hosts: ue
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "Install srsUE binary"
+      ansible.builtin.command:
+        cmd: make install
+        chdir: "{{ srsue_source_dir }}/build"
+      changed_when: true
+
+    - name: "Run ldconfig"
+      ansible.builtin.command: ldconfig
+      changed_when: true
+
+    - name: "Create srsUE config directory"
+      ansible.builtin.file:
+        path: "{{ srsue_config_dir }}"
+        state: directory
+        mode: "0755"
+
+    # The ZMQ ports are crossed: gNB tx (port 2000) = UE rx, and
+    # gNB rx (port 2001) = UE tx. Both use loopback (same Pi).
+    - name: "Deploy srsUE configuration file"
+      ansible.builtin.copy:
+        dest: "{{ srsue_config_dir }}/{{ srsue_config_file }}"
+        mode: "0644"
+        content: |
+          [rf]
+          freq_offset = 0
+          tx_gain = {{ srsue_tx_gain }}
+          rx_gain = {{ srsue_rx_gain }}
+          srate = {{ srsue_srate }}
+          nof_antennas = 1
+
+          device_name = {{ srsue_rf_device }}
+          device_args = tx_port={{ srsue_zmq_tx_port }},rx_port={{ srsue_zmq_rx_port }},base_srate={{ srsue_srate }}
+
+          [rat.eutra]
+          dl_earfcn = 2850
+          nof_carriers = 0
+
+          [rat.nr]
+          nof_carriers = 1
+          bands = {{ srsue_nr_bands }}
+          nof_prb = {{ srsue_nr_nof_prb | default(52) }}
+          max_nof_prb = {{ srsue_nr_nof_prb | default(52) }}
+          dl_nr_arfcn = {{ srsue_dl_nr_arfcn }}
+          ssb_nr_arfcn = {{ srsue_ssb_nr_arfcn }}
+
+          [pcap]
+          enable = none
+          mac_filename = /tmp/ue_mac.pcap
+          mac_nr_filename = /tmp/ue_mac_nr.pcap
+          nas_filename = /tmp/ue_nas.pcap
+
+          [log]
+          all_level = info
+          phy_lib_level = none
+          all_hex_limit = 32
+          filename = /tmp/srsue.log
+          file_max_size = -1
+
+          [usim]
+          mode = soft
+          algo = milenage
+          opc  = {{ srsue_opc }}
+          k    = {{ srsue_ki }}
+          imsi = {{ srsue_imsi }}
+          imei = {{ srsue_imei }}
+
+          [rrc]
+          release = 15
+          ue_category = 4
+
+          [nas]
+          apn = {{ srsue_apn }}
+          apn_protocol = ipv4
+
+          [gw]
+          netns = {{ srsue_netns }}
+          ip_devname = {{ srsue_tun_name }}
+          ip_netmask = 255.255.255.0
+
+    # The UE TUN interface lives in a network namespace to keep its traffic
+    # isolated from the host.  Create the namespace idempotently.
+    - name: "Create UE network namespace"
+      ansible.builtin.command:
+        cmd: "ip netns add {{ srsue_netns }}"
+      register: _netns_add
+      changed_when: _netns_add.rc == 0
+      failed_when: _netns_add.rc != 0 and 'exists' not in _netns_add.stderr

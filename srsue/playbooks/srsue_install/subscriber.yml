@@ -1,0 +1,84 @@
+---
+# Provision a test subscriber in the Open5GS MongoDB on the core Pi.
+# The IMSI, Ki, and OPC must match the srsUE configuration.
+# MongoDB runs in a Docker container, so we use 'docker exec' to reach the
+# mongo shell.  MongoDB 5.0+ ships 'mongosh'; 4.4 ships 'mongo'.
+- name: "srsUE | Provision test subscriber in Open5GS"
+  hosts: core
+  become: true
+  gather_facts: false
+
+  vars:
+    _mongo_container: "open5gs-mongodb"
+
+  tasks:
+    # Detect which mongo shell binary is available in the container.
+    # MongoDB 5.0+ images ship 'mongosh'; older 4.4 images ship 'mongo'.
+    - name: "Detect mongo shell binary"
+      ansible.builtin.shell:
+        cmd: >-
+          docker exec {{ _mongo_container }} sh -c
+          'command -v mongosh || command -v mongo'
+      register: _mongo_shell_result
+      changed_when: false
+
+    - name: "Set _mongo_shell fact"
+      ansible.builtin.set_fact:
+        _mongo_shell: "{{ _mongo_shell_result.stdout | trim | basename }}"
+
+    # The subscriber record is inserted via the mongo shell into the open5gs
+    # database.  If the IMSI already exists, the task is skipped (idempotent).
+    - name: "Check if test subscriber already exists"
+      ansible.builtin.command:
+        cmd: >-
+          docker exec {{ _mongo_container }} {{ _mongo_shell }} --quiet --eval
+          'db.getSiblingDB("open5gs").subscribers.countDocuments({imsi: "{{ srsue_imsi }}"})'
+      register: _sub_count
+      changed_when: false
+
+    - name: "Add test subscriber (IMSI={{ srsue_imsi }})"
+      ansible.builtin.command:
+        cmd: >-
+          docker exec {{ _mongo_container }} {{ _mongo_shell }} --eval '
+            db = db.getSiblingDB("open5gs");
+            db.subscribers.insertOne({
+              imsi: "{{ srsue_imsi }}",
+              security: {
+                k:   "{{ srsue_ki }}",
+                opc: "{{ srsue_opc }}",
+                amf: "8000",
+                sqn: NumberLong(513)
+              },
+              ambr: {
+                downlink: { value: NumberInt(1), unit: NumberInt(3) },
+                uplink:   { value: NumberInt(1), unit: NumberInt(3) }
+              },
+              slice: [{
+                sst: NumberInt(1),
+                default_indicator: true,
+                session: [{
+                  name: "{{ srsue_apn }}",
+                  type: NumberInt(3),
+                  qos: {
+                    index: NumberInt(9),
+                    arp: {
+                      priority_level: NumberInt(8),
+                      pre_emption_capability: NumberInt(1),
+                      pre_emption_vulnerability: NumberInt(1)
+                    }
+                  },
+                  ambr: {
+                    downlink: { value: NumberInt(1), unit: NumberInt(3) },
+                    uplink:   { value: NumberInt(1), unit: NumberInt(3) }
+                  }
+                }]
+              }]
+            });
+          '
+      when: _sub_count.stdout | trim | int == 0
+      changed_when: true
+
+    - name: "Subscriber already provisioned"
+      ansible.builtin.debug:
+        msg: "IMSI {{ srsue_imsi }} already exists in Open5GS — skipping"
+      when: _sub_count.stdout | trim | int > 0

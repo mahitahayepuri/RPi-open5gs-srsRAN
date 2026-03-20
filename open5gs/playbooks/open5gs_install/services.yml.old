@@ -1,0 +1,106 @@
+---
+- name: "Open5GS | Deploy systemd target, enable and start NF services"
+  hosts: candidate:&core
+  become: true
+  gather_facts: false
+
+  tasks:
+    # --- Deploy systemd target and drop-in overrides -----------------------
+
+    # The target is generated from the open5gs_nf_services variable so it
+    # stays in sync if the NF list is customized in group_vars/core.yml.
+    - name: "Install open5gs-stack.target"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/open5gs-stack.target
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Open5GS 5G SA Core Stack
+          After=network-online.target docker.service
+          Wants=network-online.target
+          {% for nf in open5gs_nf_services %}
+          Wants={{ nf }}.service
+          {% endfor %}
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: reload systemd
+
+    - name: "Create drop-in directory for NRF (starts first, no After=)"
+      ansible.builtin.file:
+        path: /etc/systemd/system/open5gs-nrfd.service.d
+        state: directory
+        mode: "0755"
+
+    - name: "Deploy NRF drop-in override"
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../files/systemd/open5gs-nrfd-override.conf"
+        dest: /etc/systemd/system/open5gs-nrfd.service.d/override.conf
+        mode: "0644"
+      notify: reload systemd
+
+    - name: "Create drop-in directories for remaining NFs"
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ item }}.service.d"
+        state: directory
+        mode: "0755"
+      loop: "{{ open5gs_nf_services | reject('equalto', 'open5gs-nrfd') | list }}"
+
+    - name: "Deploy NF drop-in overrides (PartOf + After=NRF)"
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../files/systemd/open5gs-nf-override.conf"
+        dest: "/etc/systemd/system/{{ item }}.service.d/override.conf"
+        mode: "0644"
+      loop: "{{ open5gs_nf_services | reject('equalto', 'open5gs-nrfd') | list }}"
+      notify: reload systemd
+
+    # --- Flush handlers so systemd picks up new units before we start ------
+
+    - name: "Flush handlers"
+      ansible.builtin.meta: flush_handlers
+
+    # --- Enable and start via the target -----------------------------------
+
+    # Use 'restarted' (not 'started') so that services always reload configs
+    # patched by earlier stages (network.yml, logging.yml).  On a fresh install
+    # the apt packages auto-start NFs with default configs; 'started' would
+    # leave them running with stale settings (e.g. NGAP on loopback instead
+    # of the RAN address).
+    - name: "Enable and start open5gs-stack.target"
+      ansible.builtin.systemd:
+        name: open5gs-stack.target
+        enabled: true
+        state: restarted
+        daemon_reload: true
+
+    # --- Verify -------------------------------------------------------------
+
+    - name: "Wait for NFs to settle"
+      ansible.builtin.pause:
+        seconds: 5     # most NFs reach 'active' in 1-3s; 5s is a safe margin
+
+    - name: "Verify NF services are running"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+      register: nf_status
+      loop: "{{ open5gs_nf_services }}"
+
+    - name: "Report NF service status"
+      ansible.builtin.debug:
+        msg: "{{ item.item }}: {{ item.status.ActiveState | default('unknown') }}"
+      loop: "{{ nf_status.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # --- Deploy health-check tool ------------------------------------------
+
+    - name: "Deploy open5gs_check health-check script"
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../tools/check_status.sh"
+        dest: /usr/local/bin/open5gs_check
+        mode: "0755"
+
+  handlers:
+    - name: reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true

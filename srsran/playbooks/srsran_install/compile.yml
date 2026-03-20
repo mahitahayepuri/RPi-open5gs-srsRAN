@@ -1,0 +1,68 @@
+---
+- name: "srsRAN | Clone and compile"
+  hosts: candidate:&gnb
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: "Clone srsRAN Project repository"
+      ansible.builtin.git:
+        repo: "{{ srsran_source_repo }}"
+        dest: "{{ srsran_source_dir }}"
+        version: "{{ srsran_source_version }}"
+        depth: 1
+        force: true
+
+    - name: "Create build directory"
+      ansible.builtin.file:
+        path: "{{ srsran_source_dir }}/build"
+        state: directory
+        mode: "0755"
+
+    # Use srsRAN's own MTUNE cache variable for Pi-specific tuning.
+    # We leave MARCH at the cmake default (armv8-a) — the crypto
+    # intrinsic check in channel_coding/CMakeLists.txt will append
+    # +crypto automatically when the base arch test fails.
+    - name: "Determine CPU tuning target"
+      ansible.builtin.set_fact:
+        _srsran_mtune: >-
+          {{ (rpi_model is match('^Raspberry Pi 5'))
+             | ternary('cortex-a76', 'cortex-a72') }}
+
+    # Auto-scale: min(CPU_count, RAM_MB / 1500). Each linker process can use
+    # ~1.5 GB RAM; exceeding physical RAM causes OOM kills during linking.
+    - name: "Determine build parallelism"
+      ansible.builtin.set_fact:
+        _srsran_jobs: >-
+          {% if srsran_build_jobs | int > 0 -%}
+            {{ srsran_build_jobs }}
+          {%- else -%}
+            {{ [[ansible_processor_vcpus, (ansible_memtotal_mb / 1500) | int] | min, 1] | max }}
+          {%- endif %}
+
+    # Both ZMQ and UHD are always enabled so switching RF driver
+    # is a runtime config change -- no recompile needed.
+    - name: "Configure with cmake"
+      ansible.builtin.command:
+        cmd: >-
+          cmake ..
+          -DCMAKE_BUILD_TYPE={{ srsran_cmake_build_type }}
+          -DCMAKE_INSTALL_PREFIX={{ srsran_install_prefix }}
+          -DMTUNE={{ _srsran_mtune }}
+          -DENABLE_EXPORT=ON
+          -DENABLE_ZEROMQ=ON
+          -DENABLE_UHD=ON
+          {{ srsran_cmake_extra_flags }}
+        chdir: "{{ srsran_source_dir }}/build"
+      # cmake always reconfigures; no reliable stdout for change detection
+      changed_when: true
+
+    # Compilation can take 30-60+ min on Pi 4, 15-30 min on Pi 5.
+    # Use async to prevent SSH timeouts on long builds.
+    - name: "Compile srsRAN (this will take a while on a Pi)"
+      ansible.builtin.command:
+        cmd: "make -j{{ _srsran_jobs }}"
+        chdir: "{{ srsran_source_dir }}/build"
+      async: "{{ srsran_build_timeout }}"
+      poll: 60
+      changed_when: true

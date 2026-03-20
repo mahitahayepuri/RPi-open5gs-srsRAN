@@ -1,0 +1,201 @@
+---
+# Reconfigure the RF band, bandwidth, and frequency on a running 5G SA network.
+#
+# This playbook is for UHD (real SDR) mode only. ZMQ mode uses fixed RF
+# parameters and does not need reconfiguration. The playbook checks the
+# current driver mode before making any changes and fails with a clear
+# message if the gNB is in ZMQ mode.
+#
+# Usage:
+#   # Switch to band n78 (TDD, 3.5 GHz) with 20 MHz bandwidth:
+#   ansible-playbook -i inventory-pi5.ini reconfigure-rf.yml \
+#     -e rf_band=78 -e rf_bandwidth_mhz=20
+#
+#   # Switch to band n7 (FDD, 2.6 GHz) with 10 MHz bandwidth:
+#   ansible-playbook -i inventory-pi5.ini reconfigure-rf.yml \
+#     -e rf_band=7 -e rf_bandwidth_mhz=10
+#
+#   # Specify a custom ARFCN (advanced — overrides auto-calculated center):
+#   ansible-playbook -i inventory-pi5.ini reconfigure-rf.yml \
+#     -e rf_band=78 -e rf_bandwidth_mhz=20 -e rf_dl_arfcn=632628
+#
+# Supported bands: n3 (FDD), n7 (FDD), n41 (TDD), n77 (TDD), n78 (TDD)
+# Supported bandwidths: 5, 10, 15, 20 MHz
+#
+# The playbook auto-calculates:
+#   - Duplex mode (FDD or TDD) from the band number
+#   - Subcarrier spacing (15 kHz for FDD, 30 kHz for TDD)
+#   - Center-of-band DL ARFCN (unless overridden with rf_dl_arfcn)
+#   - Minimum sample rate for the bandwidth + SCS combination
+
+# ---------------------------------------------------------------------------
+# 1. Check the gNB is in UHD mode (fail fast before any calculations)
+# ---------------------------------------------------------------------------
+- name: "Reconfigure RF — verify UHD mode"
+  hosts: gnb
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "Read current RF driver from gNB config"
+      ansible.builtin.command:
+        cmd: >-
+          yq '.ru_sdr.device_driver'
+          {{ srsran_gnb_config_path | default('/etc/srsran') }}/{{ srsran_gnb_config_file | default('gnb.yml') }}
+      register: _current_driver
+      changed_when: false
+
+    - name: "Fail if gNB is in ZMQ mode"
+      ansible.builtin.fail:
+        msg: >-
+          RF reconfiguration is for UHD (real SDR) mode only.
+          The gNB is currently configured with device_driver={{ _current_driver.stdout | trim }}.
+          ZMQ mode uses fixed RF parameters — band, frequency, and bandwidth
+          are irrelevant without real radio hardware.
+          To switch to UHD mode first, re-run the srsRAN playbook:
+            ansible-playbook -i <inventory> srsran/playbooks/srsran.yml -e srsran_rf_driver=uhd
+      when: _current_driver.stdout | trim != 'uhd'
+
+# ---------------------------------------------------------------------------
+# 2. Validate inputs and calculate RF parameters (runs on localhost)
+# ---------------------------------------------------------------------------
+- name: "Reconfigure RF — validate and calculate"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # Student provides these via -e flags:
+    rf_band: "{{ rf_band | default(3) }}"
+    rf_bandwidth_mhz: "{{ rf_bandwidth_mhz | default(10) }}"
+
+    # Band database — frequency ranges in kHz, SCS, duplex mode
+    _bands:
+      3:  { duplex: "fdd", dl_low: 1805000, dl_high: 1880000, ul_low: 1710000, ul_high: 1785000, scs: 15 }
+      7:  { duplex: "fdd", dl_low: 2620000, dl_high: 2690000, ul_low: 2500000, ul_high: 2570000, scs: 15 }
+      41: { duplex: "tdd", dl_low: 2496000, dl_high: 2690000, scs: 30 }
+      77: { duplex: "tdd", dl_low: 3300000, dl_high: 4200000, scs: 30 }
+      78: { duplex: "tdd", dl_low: 3300000, dl_high: 3800000, scs: 30 }
+
+    # Sample rate lookup — (bandwidth_MHz, SCS_kHz) -> minimum sample rate in MHz
+    _srate_table:
+      "5_15":  5.76
+      "10_15": 11.52
+      "15_15": 15.36
+      "20_15": 23.04
+      "10_30": 23.04
+      "15_30": 23.04
+      "20_30": 23.04
+      "40_30": 46.08
+
+  tasks:
+    - name: "Validate band is supported"
+      ansible.builtin.assert:
+        that: (rf_band | int) in _bands
+        fail_msg: >-
+          Band n{{ rf_band }} is not in the supported list.
+          Supported bands: {{ _bands.keys() | map('regex_replace', '^', 'n') | join(', ') }}
+
+    - name: "Look up band properties"
+      ansible.builtin.set_fact:
+        _band: "{{ _bands[rf_band | int] }}"
+
+    - name: "Validate bandwidth fits in the band"
+      ansible.builtin.assert:
+        that: >-
+          ((_band.dl_high | int) - (_band.dl_low | int)) >= (rf_bandwidth_mhz | int) * 1000
+        fail_msg: >-
+          {{ rf_bandwidth_mhz }} MHz bandwidth does not fit in band n{{ rf_band }}
+          ({{ ((_band.dl_high | int) - (_band.dl_low | int)) / 1000 }} MHz available)
+
+    - name: "Look up sample rate"
+      ansible.builtin.set_fact:
+        _srate_key: "{{ rf_bandwidth_mhz }}_{{ _band.scs }}"
+    - name: "Validate sample rate combination exists"
+      ansible.builtin.assert:
+        that: _srate_key in _srate_table
+        fail_msg: >-
+          No sample rate defined for {{ rf_bandwidth_mhz }} MHz bandwidth with
+          {{ _band.scs }} kHz SCS. Supported combinations:
+          {{ _srate_table.keys() | join(', ') }}
+
+    # Calculate center-of-band DL ARFCN using 3GPP TS 38.104 formula
+    # For < 3 GHz:  ARFCN = freq_kHz / 5
+    # For >= 3 GHz: ARFCN = 600000 + (freq_kHz - 3000000) / 15
+    - name: "Calculate center DL frequency"
+      ansible.builtin.set_fact:
+        _center_khz: "{{ ((_band.dl_low | int) + (_band.dl_high | int)) / 2 }}"
+
+    - name: "Calculate DL ARFCN from center frequency"
+      ansible.builtin.set_fact:
+        _auto_arfcn: >-
+          {% if (_center_khz | float) < 3000000 -%}
+            {{ ((_center_khz | float) / 5) | int }}
+          {%- else -%}
+            {{ (600000 + ((_center_khz | float) - 3000000) / 15) | int }}
+          {%- endif %}
+
+    # Use student-provided ARFCN if given, otherwise auto-calculated
+    - name: "Set final RF parameters"
+      ansible.builtin.set_fact:
+        rf_params:
+          band: "{{ rf_band | int }}"
+          dl_arfcn: "{{ rf_dl_arfcn | default(_auto_arfcn | trim) | int }}"
+          bandwidth_mhz: "{{ rf_bandwidth_mhz | int }}"
+          scs: "{{ _band.scs | int }}"
+          duplex: "{{ _band.duplex }}"
+          srate: "{{ _srate_table[_srate_key] }}"
+          center_mhz: "{{ (_center_khz | float) / 1000 }}"
+
+    - name: "Display calculated RF configuration"
+      ansible.builtin.debug:
+        msg: |
+          RF Configuration:
+            Band:       n{{ rf_params.band }} ({{ rf_params.duplex | upper }})
+            DL ARFCN:   {{ rf_params.dl_arfcn }}
+            Center:     {{ rf_params.center_mhz }} MHz
+            Bandwidth:  {{ rf_params.bandwidth_mhz }} MHz
+            SCS:        {{ rf_params.scs }} kHz
+            Sample rate: {{ rf_params.srate }} MHz
+
+# ---------------------------------------------------------------------------
+# 3. Patch the gNB config on the gNB Pi
+# ---------------------------------------------------------------------------
+- name: "Reconfigure RF — srsRAN gNB"
+  hosts: gnb
+  become: true
+  gather_facts: false
+
+  vars:
+    _rf: "{{ hostvars['localhost']['rf_params'] }}"
+    _gnb_config: "{{ srsran_gnb_config_path | default('/etc/srsran') }}/{{ srsran_gnb_config_file | default('gnb.yml') }}"
+
+  tasks:
+    - name: "Gather service facts"
+      ansible.builtin.service_facts:
+
+    - name: "Patch gNB config — band, ARFCN, bandwidth, SCS, sample rate"
+      ansible.builtin.command:
+        cmd: >-
+          yq -i '
+            .cell_cfg.dl_arfcn = {{ _rf.dl_arfcn }} |
+            .cell_cfg.band = {{ _rf.band }} |
+            .cell_cfg.channel_bandwidth_MHz = {{ _rf.bandwidth_mhz }} |
+            .cell_cfg.common_scs = {{ _rf.scs }} |
+            .ru_sdr.srate = {{ _rf.srate }}
+          ' {{ _gnb_config }}
+      changed_when: true
+
+    - name: "Restart gNB service to apply changes"
+      ansible.builtin.systemd:
+        name: srsran-gnb
+        state: restarted
+      when: ansible_facts.services['srsran-gnb.service'].state | default('inactive') == 'active'
+
+    - name: "gNB service not running — changes saved"
+      ansible.builtin.debug:
+        msg: >-
+          gNB config updated: band n{{ _rf.band }} ({{ _rf.duplex | upper }}),
+          {{ _rf.bandwidth_mhz }} MHz, ARFCN {{ _rf.dl_arfcn }}.
+          Start with: sudo systemctl start srsran-gnb
+      when: ansible_facts.services['srsran-gnb.service'].state | default('inactive') != 'active'

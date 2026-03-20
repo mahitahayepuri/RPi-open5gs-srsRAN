@@ -1,0 +1,45 @@
+---
+- name: "srsRAN | Configure RAN-facing network address"
+  hosts: candidate:&gnb
+  become: true
+  gather_facts: true
+
+  tasks:
+    # --- RAN-facing secondary IP (N2/N3 backhaul) --------------------------
+    # Adds the gNB's RAN address as a secondary IP on the physical NIC.
+    # The gNB binds on this address to communicate with the Open5GS AMF
+    # (NGAP/SCTP on N2) and UPF (GTP-U on N3) on the core Pi.
+
+    - name: "Deploy systemd service for RAN backhaul address"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/srsran-ran-addr.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=srsRAN RAN backhaul address ({{ srsran_gnb_bind_addr }}/{{ srsran_ran_prefix }})
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=-/sbin/ip addr add {{ srsran_gnb_bind_addr }}/{{ srsran_ran_prefix }} dev {{ ansible_default_ipv4.interface }}
+          ExecStop=-/sbin/ip addr del {{ srsran_gnb_bind_addr }}/{{ srsran_ran_prefix }} dev {{ ansible_default_ipv4.interface }}
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart ran-addr
+
+    - name: "Enable and start RAN address service"
+      ansible.builtin.systemd:
+        name: srsran-ran-addr
+        enabled: true
+        state: started
+        daemon_reload: true
+
+  handlers:
+    - name: restart ran-addr
+      ansible.builtin.systemd:
+        name: srsran-ran-addr
+        state: restarted
+        daemon_reload: true

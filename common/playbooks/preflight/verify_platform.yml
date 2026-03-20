@@ -1,0 +1,184 @@
+---
+# /playbooks/preflight/verify_platform.yml
+# Purpose: Verify memory, model, and OS on Raspberry Pi units; compute booleans;
+# publish a single master flag (preflight_ok) and dynamic groups for later plays.
+
+- name: "Preflight | Verify memory, model, and OS (Raspberry Pi OS on Debian 13 Trixie)"
+  hosts: rpi
+  gather_facts: true
+
+  vars:
+    # Minimum memory threshold (MB)
+    min_mem_mb: 4096
+
+    # Model patterns considered "Pi 4 or newer"
+    pi4_or_newer_patterns:
+      - '^Raspberry Pi 4'
+#      - '^Raspberry Pi 400'
+#      - '^Raspberry Pi Compute Module 4'
+      - '^Raspberry Pi 5'
+#      - '^Raspberry Pi Compute Module 5'
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Model detection (Device Tree 'model' is a binary, NUL-terminated string)
+    # Linux exposes the Devicetree model under /sys/firmware/devicetree/base/model
+    # or /proc/device-tree/model.
+    # -------------------------------------------------------------------------
+    - name: "Read Device Tree model (primary path, binary)"
+      ansible.builtin.slurp:
+        src: /sys/firmware/devicetree/base/model
+      register: dt_model_primary
+      ignore_errors: true
+      changed_when: false
+
+    - name: "Read Device Tree model (fallback path, binary)"
+      ansible.builtin.slurp:
+        src: /proc/device-tree/model
+      register: dt_model_fallback
+      when: dt_model_primary is failed
+      ignore_errors: true
+      changed_when: false
+
+    - name: "Set raw model bytes (decoded, may contain NULs)"
+      ansible.builtin.set_fact:
+        rpi_model_raw: >-
+          {{
+            (dt_model_primary.content | default('') | b64decode)
+            if (dt_model_primary is defined and dt_model_primary is not failed) else
+            ((dt_model_fallback.content | default('') | b64decode)
+             if (dt_model_fallback is defined and dt_model_fallback is not failed) else '')
+          }}
+
+    - name: "Normalize Device Tree model (strip NULs, trim)"
+      ansible.builtin.set_fact:
+        rpi_model: "{{ rpi_model_raw | regex_replace('\u0000','') | trim }}"
+
+    - name: "Build Pi4+ detection regex"
+      ansible.builtin.set_fact:
+        pi4_or_newer_regex: "{{ '(' ~ (pi4_or_newer_patterns | join(')|(')) ~ ')' }}"
+
+    # -------------------------------------------------------------------------
+    # OS identification (standardized /etc/os-release)
+    # -------------------------------------------------------------------------
+    - name: "Slurp /etc/os-release"
+      ansible.builtin.slurp:
+        src: /etc/os-release
+      register: osrel_raw
+      changed_when: false
+
+    - name: "Parse os-release into lines (filter-based; no dict comprehension)"
+      ansible.builtin.set_fact:
+        osrel_lines: >-
+          {{
+            (osrel_raw.content | b64decode).splitlines()
+            | select('match', '^[A-Z0-9_]+=')
+            | map('regex_replace', '^([A-Z0-9_]+)=(.*)$', '\1: \2')
+            | list
+          }}
+
+    - name: "Build os-release dictionary"
+      ansible.builtin.set_fact:
+        osrel: "{{ osrel_lines | join('\n') | from_yaml }}"
+
+    # -------------------------------------------------------------------------
+    # Detect official Raspberry Pi OS by the presence of Raspberry Pi repo host
+    # The official repository host is 'archive.raspberrypi.com'.
+    # -------------------------------------------------------------------------
+    - name: "Gather APT source files (.list and .sources)"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        find /etc/apt -maxdepth 2 -type f \( -name "*.list" -o -name "*.sources" \) 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      register: apt_files
+      changed_when: false
+
+    - name: "Check for Raspberry Pi repository host in APT sources"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        files="{{ apt_files.stdout }}"
+        if [ -z "$files" ]; then exit 1; fi
+        grep -E -q 'archive\.raspberrypi\.com' $files
+      args:
+        executable: /bin/bash
+      register: raspirepo_check
+      changed_when: false
+      failed_when: false
+
+    - name: "Set fact for Raspberry Pi OS repo presence"
+      ansible.builtin.set_fact:
+        is_rpi_os_repo: "{{ raspirepo_check.rc == 0 }}"
+
+    # -------------------------------------------------------------------------
+    # Assertions (optional but useful for visibility)
+    # -------------------------------------------------------------------------
+    - name: "Assert memory ≥ {{ min_mem_mb }} MB"
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.memtotal_mb | int >= min_mem_mb
+        fail_msg: "FAIL: memtotal={{ ansible_facts.memtotal_mb }} MB (needs ≥ {{ min_mem_mb }} MB)"
+        success_msg: "OK: memtotal={{ ansible_facts.memtotal_mb }} MB (≥ {{ min_mem_mb }} MB)"
+
+    - name: "Assert model is Raspberry Pi 4 or newer"
+      ansible.builtin.assert:
+        that:
+          - rpi_model is match(pi4_or_newer_regex)
+        fail_msg: "FAIL: model '{{ rpi_model }}' is not Pi 4 or newer"
+        success_msg: "OK: model '{{ rpi_model }}' is Pi 4 or newer"
+
+    - name: "Assert OS codename is Debian 13 (trixie)"
+      ansible.builtin.assert:
+        that:
+          - osrel.VERSION_CODENAME | lower == 'trixie'
+        fail_msg: >-
+          FAIL: VERSION_CODENAME is not 'trixie'.
+          VERSION_CODENAME={{ osrel.VERSION_CODENAME | default('N/A') }},
+          PRETTY_NAME={{ osrel.PRETTY_NAME | default('N/A') }}
+        success_msg: >-
+          OK: Debian codename is trixie.
+          PRETTY_NAME={{ osrel.PRETTY_NAME | default('N/A') }}
+
+    - name: "Assert OS is official Raspberry Pi OS (repo host present)"
+      ansible.builtin.assert:
+        that:
+          - is_rpi_os_repo
+        fail_msg: >-
+          FAIL: Raspberry Pi repository host not found in APT sources.
+          PRETTY_NAME={{ osrel.PRETTY_NAME | default('N/A') }},
+          ID={{ osrel.ID | default('N/A') }}
+        success_msg: >-
+          OK: Official Raspberry Pi repository host detected (archive.raspberrypi.com).
+          PRETTY_NAME={{ osrel.PRETTY_NAME | default('N/A') }}
+
+    # -------------------------------------------------------------------------
+    # Compute individual booleans and one master flag for later tasks/plays
+    # set_fact variables are available to subsequent tasks/plays in this run.
+    # Add "cacheable: true" if you rely on a fact cache across runs.
+    # -------------------------------------------------------------------------
+    - name: "Compute mem_ok / model_ok / os_ok"
+      ansible.builtin.set_fact:
+        mem_ok: "{{ (ansible_facts.memtotal_mb | int) >= min_mem_mb }}"
+        model_ok: "{{ rpi_model is match(pi4_or_newer_regex) }}"
+        os_ok: >-
+          {{
+            (osrel.VERSION_CODENAME | default('') | lower == 'trixie')
+            and (is_rpi_os_repo | bool)
+          }}
+
+    - name: "Compute the single master flag: preflight_ok"
+      ansible.builtin.set_fact:
+        preflight_ok: "{{ mem_ok and model_ok and os_ok }}"
+
+    # -------------------------------------------------------------------------
+    # Dynamic grouping for later plays in this same run
+    # -------------------------------------------------------------------------
+    - name: "Group hosts that passed preflight"
+      ansible.builtin.group_by:
+        key: "preflight_pass"
+      when: preflight_ok | bool
+
+    - name: "Group hosts that failed preflight"
+      ansible.builtin.group_by:
+        key: "preflight_fail"
+      when: not (preflight_ok | bool)

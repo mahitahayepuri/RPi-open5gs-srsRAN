@@ -1,0 +1,66 @@
+---
+# Deploy the Open5GS WebUI as a Docker container.
+# The image is built from the open5gs source tree (docker/webui/Dockerfile).
+# It connects to the MongoDB instance already running on the core Pi.
+#
+# After deployment: http://<core_ip>:9999  (default login admin/1423)
+
+- name: "Open5GS | Deploy WebUI (Docker)"
+  hosts: candidate:&core
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: "Clone Open5GS repository (for WebUI Dockerfile)"
+      ansible.builtin.git:
+        repo: "{{ open5gs_source_repo }}"
+        dest: "{{ open5gs_webui_source_dir }}"
+        version: "{{ open5gs_source_version }}"
+        depth: 1
+        force: true
+
+    - name: "Build WebUI Docker image"
+      ansible.builtin.command:
+        cmd: >-
+          docker build
+          -t open5gs-webui:{{ open5gs_source_version }}
+          -f docker/webui/Dockerfile .
+        chdir: "{{ open5gs_webui_source_dir }}"
+      register: _webui_build
+      changed_when: "'Successfully built' in _webui_build.stdout or 'exporting to image' in _webui_build.stdout"
+
+    - name: "Stop and remove existing WebUI container (if any)"
+      ansible.builtin.command:
+        cmd: docker rm -f open5gs-webui
+      failed_when: false
+      changed_when: true
+
+    - name: "Start WebUI container"
+      ansible.builtin.command:
+        cmd: >-
+          docker run -d
+          --name open5gs-webui
+          --network host
+          -e DB_URI=mongodb://127.0.0.1:{{ open5gs_mongo_port }}/open5gs
+          -e HOSTNAME=0.0.0.0
+          --restart unless-stopped
+          open5gs-webui:{{ open5gs_source_version }}
+          npm run start
+      # The upstream Dockerfile CMD uses "/wait && npm run start" but the
+      # /wait binary is x86_64-only.  MongoDB is already verified running
+      # by the time this play executes, so we skip /wait and run directly.
+      # HOSTNAME=0.0.0.0 makes Next.js bind on all interfaces.
+      changed_when: true
+
+    - name: "Wait for WebUI to start"
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ open5gs_webui_port }}/"
+        status_code: [200, 302]
+      register: _webui_health
+      retries: 10
+      delay: 3
+      until: _webui_health is not failed
+
+    - name: "Show WebUI access URL"
+      ansible.builtin.debug:
+        msg: "Open5GS WebUI available at http://{{ ansible_default_ipv4.address }}:{{ open5gs_webui_port }} (login: admin / 1423)"

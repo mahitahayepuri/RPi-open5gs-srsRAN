@@ -1,0 +1,110 @@
+---
+# Task file: compile and install Open5GS from source
+# Included by install.yml when open5gs_install_method == "source"
+
+- name: "source | Install build dependencies"
+  ansible.builtin.apt:
+    name: "{{ open5gs_build_deps }}"
+    state: present
+    update_cache: true
+
+# libidn package name varies across Debian versions
+- name: "source | Check for libidn-dev availability"
+  ansible.builtin.shell: apt-cache show libidn-dev > /dev/null 2>&1
+  args:
+    executable: /bin/bash
+  register: libidn_check
+  changed_when: false
+  failed_when: false
+
+- name: "source | Install libidn-dev or libidn11-dev"
+  ansible.builtin.apt:
+    name: "{{ (libidn_check.rc == 0) | ternary('libidn-dev', 'libidn11-dev') }}"
+    state: present
+
+- name: "source | Create open5gs system group"
+  ansible.builtin.group:
+    name: "{{ open5gs_group }}"
+    system: true
+
+- name: "source | Create open5gs system user"
+  ansible.builtin.user:
+    name: "{{ open5gs_user }}"
+    group: "{{ open5gs_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+
+- name: "source | Clone Open5GS repository"
+  ansible.builtin.git:
+    repo: "{{ open5gs_source_repo }}"
+    dest: "{{ open5gs_source_dir }}"
+    version: "{{ open5gs_source_version }}"
+    depth: 1
+    force: true
+
+- name: "source | Configure with meson"
+  ansible.builtin.command:
+    cmd: >-
+      meson setup build
+      --prefix={{ open5gs_source_prefix }}
+      --sysconfdir=/etc
+      --localstatedir=/var
+    chdir: "{{ open5gs_source_dir }}"
+    creates: "{{ open5gs_source_dir }}/build/build.ninja"
+
+- name: "source | Compile with ninja"
+  ansible.builtin.command:
+    cmd: ninja -C build
+    chdir: "{{ open5gs_source_dir }}"
+  changed_when: true
+
+- name: "source | Install with ninja"
+  ansible.builtin.command:
+    cmd: ninja -C build install
+    chdir: "{{ open5gs_source_dir }}"
+  changed_when: true
+
+# The build generates .service files in build/configs/systemd/ but does not
+# install them to the systemd unit path. Copy them manually.
+- name: "source | Find generated systemd service files"
+  ansible.builtin.find:
+    paths: "{{ open5gs_source_dir }}/build/configs/systemd"
+    patterns: "*.service"
+  register: source_service_files
+
+- name: "source | Install systemd service files"
+  ansible.builtin.copy:
+    src: "{{ item.path }}"
+    dest: "/etc/systemd/system/{{ item.path | basename }}"
+    mode: "0644"
+    remote_src: true
+  loop: "{{ source_service_files.files }}"
+  register: source_units_installed
+
+- name: "source | Reload systemd after installing service files"
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: source_units_installed is changed
+
+- name: "source | Create log directory"
+  ansible.builtin.file:
+    path: /var/log/open5gs
+    state: directory
+    owner: "{{ open5gs_user }}"
+    group: "{{ open5gs_group }}"
+    mode: "0755"
+
+- name: "source | Set ownership on config directory"
+  ansible.builtin.file:
+    path: /etc/open5gs
+    state: directory
+    owner: "{{ open5gs_user }}"
+    group: "{{ open5gs_group }}"
+    mode: "0755"
+    recurse: true
+
+- name: "source | Run ldconfig (pick up newly installed libraries)"
+  ansible.builtin.command: ldconfig
+  changed_when: true

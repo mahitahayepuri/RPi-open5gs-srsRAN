@@ -1,0 +1,591 @@
+---
+# nuke-from-orbit.yml — Remove all Open5GS, srsRAN, and srsUE deployment
+# artifacts so the Raspberry Pis can be cleanly re-deployed from scratch.
+#
+# This playbook is the inverse of open5gs.yml + srsran.yml + srsue.yml.
+# It tears down services, removes packages, deletes configuration files,
+# and resets kernel parameters.
+#
+# What IS removed:
+#   - Open5GS 5G core (packages, configs, services, TUN, NAT, sysctl)
+#   - Docker containers, volumes, and images (MongoDB, WebUI)
+#   - srsRAN Project gNB (binary, configs, services, source tree)
+#   - srsRAN 4G srsUE (binary, configs, source tree, network namespace)
+#   - Subscriber record in MongoDB
+#   - All log files and rsyslog/logrotate configs for the above
+#   - Grafana metrics stack (if deployed)
+#
+# What is PRESERVED (not removed):
+#   - Pi common setup (pi_setup.yml): boot overlays, cloud-init,
+#     pi-monitor, yq, rsyslog, bash history timestamps
+#   - Docker engine itself — only containers/images/volumes are removed
+#   - Build dependencies (gcc, cmake, lib*-dev, etc.)
+#
+# Usage:
+#   ansible-playbook -i inventory-pi5.ini nuke-from-orbit.yml
+#   ansible-playbook -i inventory-pi4.ini nuke-from-orbit.yml
+#
+# Safety:
+#   The playbook is idempotent — running it twice is harmless.
+#   Every removal task tolerates the target already being absent.
+
+# ===================================================================
+# Play 1 — gNB Pi: tear down srsRAN gNB, srsUE, and Grafana
+# ===================================================================
+- name: "Reset | gNB Pi — tear down srsRAN gNB and srsUE"
+  hosts: gnb
+  become: true
+  gather_facts: false
+  tasks:
+
+    # --- 1. Stop services -------------------------------------------
+
+    - name: "Stop srsran-gnb service"
+      ansible.builtin.systemd:
+        name: srsran-gnb
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: "Stop srsran-ran-addr service"
+      ansible.builtin.systemd:
+        name: srsran-ran-addr
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    # cpupower-governor sets CPU frequency to 'performance' at boot.
+    # Stopping it does not revert the governor; we handle that below.
+    - name: "Stop cpupower-governor service"
+      ansible.builtin.systemd:
+        name: cpupower-governor
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    # --- 2. Remove systemd service files ----------------------------
+
+    - name: "Remove srsRAN systemd service files"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/srsran-gnb.service
+        - /etc/systemd/system/srsran-ran-addr.service
+        - /etc/systemd/system/cpupower-governor.service
+
+    # --- 3. Remove configuration files and directories ---------------
+
+    - name: "Remove srsRAN gNB configuration directory (/etc/srsran/)"
+      ansible.builtin.file:
+        path: /etc/srsran
+        state: absent
+
+    - name: "Remove srsUE configuration directory (/etc/srsran_4g/)"
+      ansible.builtin.file:
+        path: /etc/srsran_4g
+        state: absent
+
+    - name: "Remove srsRAN gNB rsyslog configuration"
+      ansible.builtin.file:
+        path: /etc/rsyslog.d/30-srsran-gnb.conf
+        state: absent
+
+    - name: "Remove srsRAN gNB logrotate configuration"
+      ansible.builtin.file:
+        path: /etc/logrotate.d/srsran-gnb
+        state: absent
+
+    # USRP udev rules allow non-root USB access to Ettus B200/B210 SDRs
+    - name: "Remove USRP udev rules"
+      ansible.builtin.file:
+        path: /etc/udev/rules.d/99-usrp.rules
+        state: absent
+
+    # DRM KMS polling was disabled to reduce CPU jitter during real-time
+    # baseband processing.  Remove the modprobe override.
+    - name: "Remove DRM KMS polling modprobe override"
+      ansible.builtin.file:
+        path: /etc/modprobe.d/srsran-drm-kms.conf
+        state: absent
+
+    # --- 4. Remove log directories -----------------------------------
+
+    - name: "Remove srsRAN log directory (/var/log/srsran/)"
+      ansible.builtin.file:
+        path: /var/log/srsran
+        state: absent
+
+    # --- 5. Remove binaries, source trees, and libraries -------------
+
+    - name: "Remove srsRAN Project source tree"
+      ansible.builtin.file:
+        path: /usr/local/src/srsRAN_Project
+        state: absent
+
+    - name: "Remove srsRAN 4G source tree"
+      ansible.builtin.file:
+        path: /usr/local/src/srsRAN_4G
+        state: absent
+
+    # An unpatched FFTW test build may exist from earlier debugging
+    - name: "Remove srsRAN 4G unpatched test build (if present)"
+      ansible.builtin.file:
+        path: /usr/local/src/srsRAN_4G_nopatch
+        state: absent
+
+    - name: "Remove gNB and srsUE binaries"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /usr/local/bin/gnb
+        - /usr/local/bin/srsue
+
+    - name: "Remove srsRAN and E2E test helper scripts"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /usr/local/bin/srsran_check
+        - /usr/local/bin/srsue_e2e_test
+
+    # make install places shared libraries under /usr/local/lib/.
+    # Find and remove them so ldconfig doesn't reference stale .so files.
+    - name: "Find srsRAN shared libraries in /usr/local/lib/"
+      ansible.builtin.find:
+        paths: /usr/local/lib
+        patterns:
+          - "libsrs*"
+          - "libsrsran*"
+        file_type: any
+        recurse: true
+      register: _srsran_libs
+
+    - name: "Remove srsRAN shared libraries"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ _srsran_libs.files }}"
+      when: _srsran_libs.matched > 0
+
+    - name: "Rebuild shared library cache"
+      ansible.builtin.command:
+        cmd: ldconfig
+      changed_when: true
+
+    # --- 6. Remove UE network namespace ------------------------------
+
+    # srsUE creates a network namespace to isolate UE traffic from the
+    # host.  Delete it idempotently (tolerate "does not exist").
+    - name: "Delete UE network namespace ({{ srsue_netns }})"
+      ansible.builtin.command:
+        cmd: "ip netns del {{ srsue_netns }}"
+      register: _netns_del
+      changed_when: _netns_del.rc == 0
+      failed_when: >-
+        _netns_del.rc != 0
+        and 'No such file' not in _netns_del.stderr
+
+    # --- 7. Reset performance tuning ---------------------------------
+
+    # Revert CPU governor from 'performance' back to the kernel default.
+    # On Raspberry Pi OS, the default is 'ondemand'.
+    - name: "Reset CPU governor to ondemand"
+      ansible.builtin.shell:
+        cmd: >-
+          for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            echo ondemand > "$gov" 2>/dev/null || true;
+          done
+      changed_when: true
+      failed_when: false
+
+    # Re-enable DRM KMS polling (disabled for real-time performance)
+    - name: "Re-enable DRM KMS polling"
+      ansible.builtin.shell:
+        cmd: echo Y > /sys/module/drm_kms_helper/parameters/poll
+      changed_when: true
+      failed_when: false
+
+    # Remove network buffer sysctl overrides that were added for
+    # Ethernet-connected USRPs (srsran_tune_network_buffers).
+    # These may not exist if the feature was never enabled.
+    - name: "Remove network buffer sysctl overrides"
+      ansible.posix.sysctl:
+        name: "{{ item }}"
+        state: absent
+        reload: true
+      loop:
+        - net.core.wmem_max
+        - net.core.rmem_max
+        - net.core.wmem_default
+        - net.core.rmem_default
+      failed_when: false
+
+
+# ===================================================================
+# Play 2 — Core Pi: tear down Open5GS 5G core
+# ===================================================================
+- name: "Reset | Core Pi — tear down Open5GS 5G core"
+  hosts: core
+  become: true
+  gather_facts: false
+  tasks:
+
+    # --- 1. Stop Open5GS services -----------------------------------
+
+    # Stop the stack target first — this stops all NF services together
+    - name: "Stop open5gs-stack.target"
+      ansible.builtin.systemd:
+        name: open5gs-stack.target
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    # Belt-and-suspenders: stop each NF individually in case the target
+    # was already removed but individual services were still enabled
+    - name: "Stop individual Open5GS NF services"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop: "{{ open5gs_nf_services }}"
+      failed_when: false
+
+    - name: "Stop Open5GS NAT service"
+      ansible.builtin.systemd:
+        name: open5gs-nat
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: "Stop Open5GS RAN backhaul address service"
+      ansible.builtin.systemd:
+        name: open5gs-ran-addr
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    # --- 2. Remove Docker containers, volumes, and images -----------
+
+    - name: "Stop and remove WebUI Docker container"
+      ansible.builtin.command:
+        cmd: docker rm -f open5gs-webui
+      register: _webui_rm
+      changed_when: _webui_rm.rc == 0
+      failed_when: false
+
+    - name: "Stop and remove MongoDB Docker container"
+      ansible.builtin.command:
+        cmd: docker rm -f open5gs-mongodb
+      register: _mongo_rm
+      changed_when: _mongo_rm.rc == 0
+      failed_when: false
+
+    # WARNING: this destroys all subscriber data in MongoDB
+    - name: "Remove MongoDB Docker volume (destroys subscriber data)"
+      ansible.builtin.command:
+        cmd: docker volume rm open5gs_mongodb_data
+      register: _vol_rm
+      changed_when: _vol_rm.rc == 0
+      failed_when: false
+
+    # Remove both the locally-built WebUI image and the MongoDB image.
+    # Pi 4 and Pi 5 use different MongoDB images; try both.
+    - name: "Remove Docker images (WebUI + MongoDB)"
+      ansible.builtin.command:
+        cmd: "docker rmi -f {{ item }}"
+      loop:
+        - "open5gs-webui:{{ open5gs_source_version }}"
+        - "{{ open5gs_mongo_image_pi4 }}"
+        - "{{ open5gs_mongo_image_pi5 }}"
+      changed_when: true
+      failed_when: false
+
+    # Clean up any dangling images left over from builds
+    - name: "Prune dangling Docker images"
+      ansible.builtin.command:
+        cmd: docker image prune -f
+      register: _prune
+      changed_when: "'Total reclaimed space' in _prune.stdout"
+      failed_when: false
+
+    # --- 3. Purge Open5GS packages (APT install) --------------------
+
+    - name: "Purge Open5GS packages"
+      ansible.builtin.apt:
+        name:
+          - open5gs-common
+          - open5gs-nrf
+          - open5gs-scp
+          - open5gs-amf
+          - open5gs-smf
+          - open5gs-upf
+          - open5gs-ausf
+          - open5gs-udm
+          - open5gs-udr
+          - open5gs-pcf
+          - open5gs-nssf
+          - open5gs-bsf
+        state: absent
+        purge: true
+      failed_when: false
+
+    # Remove the OBS apt repository and GPG key so a future deploy
+    # starts from a clean apt state
+    - name: "Remove Open5GS OBS apt repository and GPG key"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/open5gs.list
+        - /usr/share/keyrings/open5gs-obs.gpg
+        - /usr/share/keyrings/open5gs-obs.gpg.armored
+
+    # --- 4. Remove Open5GS source build artifacts -------------------
+
+    # These only exist if open5gs_install_method == "source".
+    # Safe to attempt removal regardless (state: absent is idempotent).
+    - name: "Remove Open5GS source tree (/usr/local/src/open5gs)"
+      ansible.builtin.file:
+        path: /usr/local/src/open5gs
+        state: absent
+
+    - name: "Find Open5GS binaries in /usr/local/bin/"
+      ansible.builtin.find:
+        paths: /usr/local/bin
+        patterns: "open5gs-*"
+        file_type: any
+      register: _o5gs_bins
+
+    - name: "Remove Open5GS binaries"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ _o5gs_bins.files }}"
+      when: _o5gs_bins.matched > 0
+
+    # Source installs create a dedicated system user/group
+    - name: "Remove open5gs system user"
+      ansible.builtin.user:
+        name: open5gs
+        state: absent
+        remove: true
+      failed_when: false
+
+    - name: "Remove open5gs system group"
+      ansible.builtin.group:
+        name: open5gs
+        state: absent
+      failed_when: false
+
+    # --- 5. Remove systemd service files and overrides ---------------
+
+    - name: "Remove Open5GS stack target"
+      ansible.builtin.file:
+        path: /etc/systemd/system/open5gs-stack.target
+        state: absent
+
+    # Each NF has a drop-in override directory with PartOf= and After=
+    # directives that link it to the stack target
+    - name: "Remove Open5GS NF service drop-in override directories"
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ item }}.service.d"
+        state: absent
+      loop: "{{ open5gs_nf_services }}"
+
+    # Source installs place .service files in /etc/systemd/system/.
+    # APT installs put them in /lib/systemd/system/ (removed by purge).
+    # Clean up any leftover files in either location.
+    - name: "Find leftover Open5GS systemd service files"
+      ansible.builtin.find:
+        paths: /etc/systemd/system
+        patterns: "open5gs-*.service"
+        file_type: any
+      register: _o5gs_svc_files
+
+    - name: "Remove leftover Open5GS systemd service files"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ _o5gs_svc_files.files }}"
+      when: _o5gs_svc_files.matched > 0
+
+    - name: "Remove Open5GS NAT and RAN backhaul service files"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/open5gs-nat.service
+        - /etc/systemd/system/open5gs-ran-addr.service
+
+    # --- 6. Remove configuration, logging, and rsyslog files ---------
+
+    - name: "Remove Open5GS configuration directory (/etc/open5gs/)"
+      ansible.builtin.file:
+        path: /etc/open5gs
+        state: absent
+
+    - name: "Remove Open5GS log directory (/var/log/open5gs/)"
+      ansible.builtin.file:
+        path: /var/log/open5gs
+        state: absent
+
+    - name: "Remove Open5GS rsyslog configuration"
+      ansible.builtin.file:
+        path: /etc/rsyslog.d/30-open5gs.conf
+        state: absent
+
+    - name: "Remove Open5GS logrotate configuration"
+      ansible.builtin.file:
+        path: /etc/logrotate.d/open5gs
+        state: absent
+
+    # --- 7. Remove TUN device (ogstun) ------------------------------
+
+    # The ogstun TUN device is managed by systemd-networkd via a .netdev
+    # and .network unit.  Remove both so the device is not recreated.
+    - name: "Remove ogstun systemd-networkd configuration"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/network/99-ogstun.netdev
+        - /etc/systemd/network/99-ogstun.network
+
+    # NetworkManager is told to ignore ogstun via a conf.d drop-in
+    - name: "Remove NetworkManager ignore rule for ogstun"
+      ansible.builtin.file:
+        path: /etc/NetworkManager/conf.d/99-ignore-ogstun.conf
+        state: absent
+
+    # Delete the TUN interface from the running kernel
+    - name: "Delete ogstun TUN interface"
+      ansible.builtin.command:
+        cmd: ip link del ogstun
+      register: _tun_del
+      changed_when: _tun_del.rc == 0
+      failed_when: false
+
+    # Restart systemd-networkd to pick up the removed config files
+    - name: "Restart systemd-networkd"
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        state: restarted
+      failed_when: false
+
+    # --- 8. Remove NAT nftables table --------------------------------
+
+    # The open5gs-nat service loads a nftables table for UE traffic NAT.
+    # Flush it from the running kernel.
+    - name: "Flush Open5GS nftables table"
+      ansible.builtin.command:
+        cmd: nft delete table ip open5gs
+      register: _nft_del
+      changed_when: _nft_del.rc == 0
+      failed_when: false
+
+    # --- 9. Reset kernel parameters ----------------------------------
+
+    # IP forwarding was enabled for UPF to route UE traffic.
+    # Reset to default (disabled) and remove from sysctl config.
+    - name: "Disable IPv4 forwarding"
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "0"
+        sysctl_set: true
+        reload: true
+      failed_when: false
+
+    - name: "Disable IPv6 forwarding"
+      ansible.posix.sysctl:
+        name: net.ipv6.conf.all.forwarding
+        value: "0"
+        sysctl_set: true
+        reload: true
+      failed_when: false
+
+    # --- 10. Remove health-check tool --------------------------------
+
+    - name: "Remove Open5GS health-check tool"
+      ansible.builtin.file:
+        path: /usr/local/bin/open5gs_check
+        state: absent
+
+    # --- 11. Remove Grafana metrics stack (if deployed) ---------------
+
+    # The Grafana stack runs as a docker-compose project in
+    # /opt/srsran-metrics.  Tear down the containers first.
+    - name: "Tear down Grafana docker-compose stack (if present)"
+      ansible.builtin.command:
+        cmd: docker compose -f docker-compose.ui.yml down --volumes --rmi all
+      args:
+        chdir: /opt/srsran-metrics/docker
+      register: _grafana_down
+      changed_when: _grafana_down.rc == 0
+      failed_when: false
+
+    # Fallback: if the compose directory was already removed in a
+    # previous run, the containers become orphans that `docker compose
+    # down` can no longer reach.  Force-remove them by name.
+    - name: "Force-remove orphaned Grafana containers"
+      ansible.builtin.command:
+        cmd: "docker rm -f {{ item }}"
+      loop:
+        - grafana
+        - telegraf
+        - influxdb
+      register: _grafana_rm
+      changed_when: _grafana_rm.rc == 0
+      failed_when: false
+
+    - name: "Remove Grafana Docker images"
+      ansible.builtin.command:
+        cmd: "docker rmi -f {{ item }}"
+      loop:
+        - srsran/grafana
+        - srsran/telegraf
+        - "influxdb:3.1.0-core"
+      register: _grafana_rmi
+      changed_when: _grafana_rmi.rc == 0
+      failed_when: false
+
+    - name: "Remove Grafana metrics directory (/opt/srsran-metrics)"
+      ansible.builtin.file:
+        path: /opt/srsran-metrics
+        state: absent
+
+
+# ===================================================================
+# Play 3 — All Pis: reload systemd, restart rsyslog, verify
+# ===================================================================
+- name: "Reset | All Pis — reload systemd and clean up"
+  hosts: rpi
+  become: true
+  gather_facts: false
+  tasks:
+
+    - name: "Reload systemd daemon"
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    # rsyslog may still have open file handles to deleted log files.
+    # Restart it to release them and pick up removed configs.
+    - name: "Restart rsyslog"
+      ansible.builtin.systemd:
+        name: rsyslog
+        state: restarted
+      failed_when: false
+
+    - name: "Remove orphaned apt packages"
+      ansible.builtin.apt:
+        autoremove: true
+      failed_when: false
+
+    # --- Summary -----------------------------------------------------
+
+    - name: "Reset complete"
+      ansible.builtin.debug:
+        msg: >-
+          All Open5GS, srsRAN, and srsUE artifacts removed from
+          {{ inventory_hostname }}.  Ready for a fresh deployment.

@@ -1,0 +1,12 @@
+---
+# srsRAN installation pipeline (runs on hosts that passed preflight)
+
+- import_playbook: build_deps.yml
+- import_playbook: compile.yml
+- import_playbook: install.yml
+- import_playbook: network.yml
+
+# Grafana metrics dashboard (runs on the [grafana] host, e.g. the Open5GS Pi)
+# TODO: Grafana stack needs rework for release_24_10_1 metrics format
+#       (JSON-over-TCP on port 55555 vs WebSocket remote_control in 25.10)
+# - import_playbook: grafana.yml

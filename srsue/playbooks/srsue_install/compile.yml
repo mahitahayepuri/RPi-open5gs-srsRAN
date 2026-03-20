@@ -1,0 +1,60 @@
+---
+# Clone srsRAN 4G and compile only the srsUE binary.
+# srsENB and srsEPC are disabled — they're for 4G and not needed here.
+- name: "srsUE | Clone and compile"
+  hosts: ue
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: "Clone srsRAN 4G repository"
+      ansible.builtin.git:
+        repo: "{{ srsue_source_repo }}"
+        dest: "{{ srsue_source_dir }}"
+        version: "{{ srsue_source_version }}"
+        depth: 1
+        force: true
+
+    - name: "Create build directory"
+      ansible.builtin.file:
+        path: "{{ srsue_source_dir }}/build"
+        state: directory
+        mode: "0755"
+
+    # RAM-aware parallelism — each linker process can use ~1.5 GB.
+    # A 4 GB Pi gets 2 jobs, an 8 GB Pi gets 4.
+    - name: "Determine build parallelism"
+      ansible.builtin.set_fact:
+        _srsue_jobs: >-
+          {{ [[ansible_processor_vcpus, (ansible_memtotal_mb / 1500) | int] | min, 1] | max }}
+
+    # FFTW_MEASURE runs timing benchmarks that block indefinitely when the
+    # RF backend is ZMQ (no real-time clock).  Switching to FFTW_ESTIMATE
+    # makes PHY initialization complete immediately.
+    - name: "Patch FFTW_MEASURE → FFTW_ESTIMATE in DFT library"
+      ansible.builtin.replace:
+        path: "{{ srsue_source_dir }}/lib/src/phy/dft/dft_fftw.c"
+        regexp: 'FFTW_MEASURE'
+        replace: 'FFTW_ESTIMATE'
+
+    - name: "Configure with cmake (srsUE only, ZMQ enabled)"
+      ansible.builtin.command:
+        cmd: >-
+          cmake ..
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CXX_FLAGS="-Wno-error=template-id-cdtor -Wno-error=array-bounds"
+          -DENABLE_SRSUE=ON
+          -DENABLE_SRSENB=OFF
+          -DENABLE_SRSEPC=OFF
+          -DENABLE_ZEROMQ=ON
+        chdir: "{{ srsue_source_dir }}/build"
+      changed_when: true
+
+    # Compilation takes ~10-15 min on Pi 5, ~20-40 min on Pi 4.
+    - name: "Compile srsUE (this will take a while on a Pi)"
+      ansible.builtin.command:
+        cmd: "make -j{{ _srsue_jobs }} srsue"
+        chdir: "{{ srsue_source_dir }}/build"
+      async: "{{ srsue_build_timeout }}"
+      poll: 60
+      changed_when: true

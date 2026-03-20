@@ -1,0 +1,14 @@
+---
+# srsUE installation pipeline
+# Builds srsUE on the gNB Pi and provisions a test subscriber in Open5GS.
+#
+# Sub-playbooks:
+#   build_deps.yml    — install compilation dependencies on [ue] host
+#   compile.yml       — clone srsRAN 4G and compile srsue binary
+#   install.yml       — install binary and deploy UE configuration
+#   subscriber.yml    — add test subscriber to Open5GS MongoDB on [core] host
+
+- import_playbook: build_deps.yml
+- import_playbook: compile.yml
+- import_playbook: install.yml
+- import_playbook: subscriber.yml

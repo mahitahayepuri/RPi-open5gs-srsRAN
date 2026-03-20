@@ -1,0 +1,11 @@
+# srsUE deployment — build and install the software UE for ZMQ testing
+#
+# This playbook is run AFTER the Open5GS and srsRAN pipelines have completed.
+# It does NOT re-run preflight or pi_setup (the gNB Pi is already configured).
+#
+# Usage:
+#   ansible-playbook -i inventory-pi5.ini srsue/playbooks/srsue.yml
+---
+
+# Build, install, and configure srsUE on the gNB Pi
+- import_playbook: srsue_install/main.yml

@@ -1,0 +1,101 @@
+---
+# End-to-end 5G SA data-path verification using srsUE (ZMQ mode).
+#
+# This playbook verifies the complete data path:
+#   UE → gNB (ZMQ) → AMF/UPF (N2/N3) → core Pi (RAN address)
+#
+# It ensures the Open5GS stack and gNB are running, deploys a test script
+# to the gNB Pi, executes it, and reports pass/fail. The test script starts
+# srsUE, waits for a PDU session, pings the core Pi through the 5G network,
+# then cleans up automatically.
+#
+# Prerequisites:
+#   - Open5GS deployed and running (open5gs/playbooks/open5gs.yml)
+#   - srsRAN gNB deployed in ZMQ mode (srsran/playbooks/srsran.yml)
+#   - srsUE deployed with subscriber provisioned (srsue/playbooks/srsue.yml)
+#
+# Usage:
+#   ansible-playbook -i inventory-pi5.ini e2e-test-srsue.yml
+
+# ---------------------------------------------------------------------------
+# 1. Verify Open5GS stack is running on the core Pi
+# ---------------------------------------------------------------------------
+- name: "E2E Test — verify Open5GS core"
+  hosts: core
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "Check Open5GS stack target is active"
+      ansible.builtin.command:
+        cmd: systemctl is-active open5gs-stack.target
+      register: _core_status
+      changed_when: false
+      failed_when: false
+
+    - name: "Fail if Open5GS is not running"
+      ansible.builtin.fail:
+        msg: >-
+          Open5GS stack is not running (status: {{ _core_status.stdout | trim }}).
+          Start it with: sudo systemctl start open5gs-stack.target
+      when: _core_status.stdout | trim != 'active'
+
+    - name: "Open5GS stack is running"
+      ansible.builtin.debug:
+        msg: "open5gs-stack.target: active"
+
+# ---------------------------------------------------------------------------
+# 2. Ensure gNB is running, deploy and execute the test on the gNB Pi
+# ---------------------------------------------------------------------------
+- name: "E2E Test — run srsUE data-path test"
+  hosts: ue
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "Start gNB service if not running"
+      ansible.builtin.systemd:
+        name: srsran-gnb
+        state: started
+      register: _gnb_started
+
+    # Give the gNB a few seconds to establish the NGAP connection to the AMF
+    - name: "Wait for gNB → AMF NGAP connection"
+      ansible.builtin.pause:
+        seconds: 5     # NGAP association typically completes in 1-3s
+      when: _gnb_started is changed
+
+    - name: "Deploy E2E test script"
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/srsue/tools/srsue_e2e_test.sh"
+        dest: /usr/local/bin/srsue_e2e_test
+        mode: "0755"
+
+    - name: "Run E2E test (srsUE attach + ping through 5G network)"
+      ansible.builtin.command:
+        cmd: /usr/local/bin/srsue_e2e_test
+      environment:
+        PING_TARGET: "{{ srsran_amf_addr }}"
+      register: _e2e_result
+      failed_when: false
+      # The script handles its own timeout and cleanup; give Ansible
+      # enough time for the full attach + ping cycle.
+      timeout: 120
+
+    - name: "Display test output"
+      ansible.builtin.debug:
+        msg: "{{ _e2e_result.stdout }}"
+
+    - name: "E2E TEST PASSED"
+      ansible.builtin.debug:
+        msg: >-
+          End-to-end data path verified: srsUE attached to the 5G network
+          and successfully pinged the core Pi through the UPF.
+      when: _e2e_result.rc == 0
+
+    - name: "E2E TEST FAILED"
+      ansible.builtin.fail:
+        msg: >-
+          End-to-end test failed (exit code {{ _e2e_result.rc }}).
+          Check the test output above and /tmp/srsue_e2e.log on the gNB Pi.
+      when: _e2e_result.rc != 0

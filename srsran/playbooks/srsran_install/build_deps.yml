@@ -1,0 +1,38 @@
+---
+- name: "srsRAN | Install build dependencies"
+  hosts: candidate:&gnb
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: "Update apt cache"
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: "Install required build dependencies"
+      ansible.builtin.apt:
+        name: "{{ srsran_build_deps }}"
+        state: present
+
+    - name: "Install optional/recommended build dependencies"
+      ansible.builtin.apt:
+        name: "{{ srsran_build_deps_optional }}"
+        state: present
+
+    # Runtime dependency: installed here (before compile) so ALL
+    # packages are present before the long build step begins.
+    - name: "Install linux-cpupower for CPU governor control"
+      ansible.builtin.apt:
+        name: linux-cpupower
+        state: present
+      when: srsran_cpu_governor == "performance"
+
+    # UHD firmware/FPGA images are needed for USRP hardware.
+    # Download them now so the device is ready at runtime.
+    - name: "Download UHD firmware images"
+      ansible.builtin.command:
+        cmd: uhd_images_downloader
+        creates: /usr/share/uhd/images/usrp_b200_fpga.bin
+      register: _uhd_dl
+      changed_when: "'Images downloaded' in _uhd_dl.stdout"
