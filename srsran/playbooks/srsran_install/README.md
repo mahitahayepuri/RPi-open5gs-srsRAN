@@ -63,7 +63,7 @@ Installs and configures the gNB:
   - AMF connection settings
   - RF driver config (ZMQ or UHD, selected by `srsran_rf_driver`)
   - Cell parameters (ARFCN, band, bandwidth, PLMN, TAC)
-  - Metrics endpoint (JSON-over-TCP on port 55555 for `release_24_10_1`)
+  - Metrics endpoint (version-aware: JSON-over-UDP on port 55555 with `enable_json_metrics: true` for `release_24`; no config needed for `release_25_10+` which auto-exposes WebSocket on `:8001`)
 - Deploys a systemd service (`srsran-gnb`) -- enabled but not started
 
 ### network.yml
@@ -79,14 +79,21 @@ Configures the RAN-facing network address so the gNB can reach the Open5GS core:
 
 **Hosts:** `grafana` (Open5GS Pi -- separate from the gNB Pi)
 
-Deploys the upstream srsRAN Grafana metrics stack as Docker containers:
+Version-aware dispatcher that deploys the srsRAN Grafana metrics stack as Docker containers. It clones the srsRAN repository to `/opt/srsran-metrics`, checks for `docker-compose.ui.yml` (present only in `release_25_10+`), and delegates to the matching task file:
 
-- Clones the srsRAN repository on the Grafana host to get the `docker/` directory (Dockerfiles, pre-built dashboards, Telegraf config)
-- Templates a `.env` file pointing Telegraf's WebSocket URL at the gNB Pi's IP address
-- Builds and starts three containers via Docker CLI commands:
-  - **Telegraf** -- connects to the gNB's metrics WebSocket, parses JSON metrics
-  - **InfluxDB 3 Core** -- in-memory time-series database
-  - **Grafana** -- pre-provisioned dashboards (home, CU-CP, NGAP, RRC, OFH, performance) on port 3300
+- **`release_24_10_1`** → `tasks/grafana_24.yml`
+  - **metrics_server** (Python) — listens on UDP 55555 for JSON metrics from the gNB
+  - **InfluxDB 2.7** — time-series database (Flux query language)
+  - **Grafana 10.1** — pre-provisioned "srsRAN Project Metrics" dashboard on port 3300
+  - The gNB must have `enable_json_metrics: true` and `metrics.addr` pointing at the core Pi
+
+- **`release_25_10+`** → `tasks/grafana_25.yml`
+  - **Telegraf** — pulls metrics from gNB WebSocket on port 8001
+  - **InfluxDB 3 Core** — in-memory time-series database (port 8081 internal only)
+  - **Grafana 12** — newer dashboards on port 3300
+  - The gNB auto-exposes WebSocket on `:8001` — no explicit metrics config needed
+
+Both variants template a `.env` file with deployment-specific settings before running `docker compose up`. Health checks verify InfluxDB (via `docker exec` since ports are not published to the host), Grafana readiness, and datasource provisioning.
 
 ## Running Standalone
 

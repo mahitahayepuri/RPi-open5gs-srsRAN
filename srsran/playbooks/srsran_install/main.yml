@@ -7,6 +7,7 @@
 - import_playbook: network.yml
 
 # Grafana metrics dashboard (runs on the [grafana] host, e.g. the Open5GS Pi)
-# TODO: Grafana stack needs rework for release_24_10_1 metrics format
-#       (JSON-over-TCP on port 55555 vs WebSocket remote_control in 25.10)
-# - import_playbook: grafana.yml
+# Auto-detects srsRAN version and deploys the matching stack:
+#   release_24  →  metrics_server + InfluxDB 2 + Grafana 10
+#   release_25+ →  Telegraf + InfluxDB 3 + Grafana 12
+- import_playbook: grafana.yml

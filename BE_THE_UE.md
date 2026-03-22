@@ -129,6 +129,19 @@ ip addr show tun_srsue
 # Should show an IP from the 10.45.0.0/16 pool
 ```
 
+Add a default route so traffic to the core Pi (which is on a different
+subnet) goes through the TUN:
+
+```bash
+ip route add default dev tun_srsue
+```
+
+> **Why is this needed?**  srsUE only adds a link-local /24 route for
+> the UE's assigned IP.  The core Pi's RAN address (e.g. 10.53.5.1) is
+> on a different subnet, so without a default route the kernel returns
+> "Network is unreachable".  The automated E2E test adds this route
+> automatically; here you do it by hand.
+
 ---
 
 ## Step 5 — Run your tests
@@ -277,6 +290,7 @@ sudo pkill -9 srsue; sudo ip netns exec ue1 ip link del tun_srsue 2>/dev/null; s
 | Start srsUE | `sudo srsue /etc/srsran_4g/ue.conf` |
 | Get core Pi address | `grep -Po '^\s*addr:\s*\K[\d.]+' /etc/srsran/gnb.yml \| head -1` |
 | Enter UE namespace | `sudo ip netns exec ue1 bash` |
+| Add default route | `ip route add default dev tun_srsue` (inside namespace) |
 | Ping through 5G | `ping <core-addr>` (inside namespace) |
 | iperf3 downlink | `iperf3 -c <core-addr> -R -t 10` (inside namespace) |
 | Exit namespace | `exit` |
