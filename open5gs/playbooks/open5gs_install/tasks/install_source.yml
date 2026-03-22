@@ -43,6 +43,8 @@
     version: "{{ open5gs_source_version }}"
     depth: 1
     force: true
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
 
 - name: "source | Configure with meson"
   ansible.builtin.command:

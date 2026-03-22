@@ -40,7 +40,7 @@
     shell: /usr/sbin/nologin
     home: /nonexistent
     create_home: false
-    
+
 - name: "apt | Install 5G SA NF packages"
   ansible.builtin.apt:
     name:

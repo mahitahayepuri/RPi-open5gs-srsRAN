@@ -126,29 +126,36 @@ the `10.45.0.0/16` pool.
 
 ### Test the data connection
 
-With srsUE running, it creates a TUN interface (usually `tun_srsue`):
+With srsUE running, it creates a TUN interface (`tun_srsue`) inside the
+`ue1` network namespace.  Quick verification:
 
 ```bash
-# Ping the internet through the 5G network:
-sudo ping -I tun_srsue 8.8.8.8
+# Read the core Pi's RAN address from the gNB config:
+CORE_ADDR=$(grep -Po '^\s*addr:\s*\K[\d.]+' /etc/srsran/gnb.yml | head -1)
 
-# Or curl a website:
-sudo curl --interface tun_srsue https://ifconfig.me
+# Ping the core Pi through the 5G user plane:
+sudo ip netns exec ue1 ping "$CORE_ADDR"
 ```
 
-If the ping succeeds, you have a working end-to-end 5G SA data path:
-UE -> gNB (ZMQ) -> AMF/UPF (N2/N3) -> internet (NAT).
+For a full walkthrough of interactive testing -- entering the UE
+namespace, running iperf, graceful shutdown, and recovery from a bad
+shutdown -- see [`BE_THE_UE.md`](BE_THE_UE.md).
 
 ### Stopping srsUE
 
 Press `Ctrl+C` in the srsUE terminal. The TUN interface is removed
 automatically.
 
+> **Important:** After srsUE exits, the gNB's ZMQ sockets will be stuck.
+> You must restart the gNB before running srsUE again — see
+> [BE_THE_UE.md Step 6](BE_THE_UE.md#step-6--shut-down-and-restart-the-gnb)
+> for the full procedure.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| srsUE hangs at "Waiting PHY to initialize" | `FFTW_MEASURE` blocks indefinitely over ZMQ | Patch `lib/src/phy/dft/dft_fftw.c`: replace `FFTW_MEASURE` with `FFTW_ESTIMATE`, then rebuild |
+| srsUE hangs at "Waiting PHY to initialize" | `FFTW_MEASURE` blocks indefinitely over ZMQ | See [SRSRAN_EDITS.md](SRSRAN_EDITS.md#1-fftw-planner-flag-fftw_measure-to-fftw_estimate) |
 | srsUE hangs at "Attaching UE..." | gNB not running or not connected to AMF | Check `journalctl -u srsran-gnb` for NGAP errors |
 | Cell search finds nothing | Wrong SSB ARFCN in UE config | Ensure `ssb_nr_arfcn` and `dl_nr_arfcn` in `ue.conf` match the gNB (check gNB log for "SSB derived" frequency) |
 | "Authentication failure" | IMSI/Ki/OPC mismatch between UE config and Open5GS | Verify subscriber: `docker exec open5gs-mongodb mongo --quiet --eval 'db.getSiblingDB("open5gs").subscribers.find().pretty()'` on the core Pi (use `mongosh` instead of `mongo` on Pi 5) |
@@ -158,6 +165,66 @@ automatically.
 | No IP address after attach | UPF or SMF issue | Check `journalctl -u open5gs-upfd` and `journalctl -u open5gs-smfd` on the core Pi |
 | "PDU Session failed" | ogstun not up or NAT not configured | Run `sudo open5gs_check` on the core Pi |
 | Ping through `tun_srsue` fails | NAT/forwarding issue on core Pi | Verify: `cat /proc/sys/net/ipv4/ip_forward` (should be `1`) |
+| Second srsUE run can't find cell / hangs at "Attaching UE..." | gNB ZMQ sockets stuck after previous UE session (see [Known limitations](#known-limitations-zmq-mode) below) | Restart the gNB: `sudo systemctl restart srsran-gnb` (wait ~5 s for NGAP) |
+
+## Known limitations (ZMQ mode)
+
+### gNB ZMQ sockets hang after srsUE disconnects
+
+After srsUE exits -- whether gracefully or not -- the gNB's ZMQ radio
+transport enters a **"Waiting for reading samples"** loop and can no
+longer accept a new UE connection.  This is a limitation of the ZMQ
+REQ/REP socket pattern used by the srsRAN Project gNB; it is not
+documented in the upstream project (which was
+[archived in February 2026](https://github.com/srsran/srsRAN_Project)).
+
+**Symptoms (visible in `journalctl -u srsran-gnb`):**
+
+```
+[zmq:rx:0:0] [I] Waiting for data.
+[zmq:tx:0:0] [I] Waiting for data.
+[zmq:rx:0:0] [I] Waiting for reading samples. Completed 0 of 5760 samples.
+```
+
+These messages repeat every second indefinitely.  A new srsUE launched
+against the same gNB will connect at the ZMQ level but never receive
+downlink samples, so it times out at cell search.
+
+**Root cause:**  The gNB's ZMQ transport uses a REQ/REP pair that
+enforces strict send/receive alternation.  Once srsUE's peer socket
+closes, the gNB's REQ socket is left waiting for a reply that will never
+arrive.  The socket cannot recover without restarting the process.  See
+[SRSRAN_EDITS.md §2](SRSRAN_EDITS.md#2-zmq-socket-hang-stdin-fifo-and-graceful-deregistration)
+for the full technical analysis.
+
+**Workaround:**  Restart the gNB service to reset the ZMQ sockets:
+
+```bash
+sudo systemctl restart srsran-gnb
+# Wait ~5 seconds for the NGAP association to re-establish
+```
+
+The automated E2E test (`e2e-test-srsue.yml`) does this automatically
+before every run.  For interactive use, see the recovery procedure in
+[BE_THE_UE.md](BE_THE_UE.md#step-6--shut-down-and-restart-the-gnb).
+
+**What we tried that did *not* fully solve it:**
+
+- **FIFO-based stdin keepalive** (keeps srsUE alive during the test --
+  works, but doesn't prevent the hang at shutdown)
+- **Graceful SIGTERM with 5 s deregistration grace period** (srsUE
+  reports "Couldn't stop after 5s. Forcing exit." -- NAS Deregistration
+  never completes over ZMQ in time)
+
+Both mitigations are still applied in the E2E test script for defence in
+depth, but the gNB restart is the only reliable fix.
+
+**Upstream status:**  No issues or discussions referencing this specific
+behaviour were found in the srsRAN Project GitHub repository (searched
+issues, discussions, and official documentation in March 2026).  The
+ZMQ transport is a development convenience; the typical tutorial
+workflow starts gNB and srsUE together and stops both with Ctrl+C,
+which avoids the problem.
 
 ## Manual setup
 
@@ -187,10 +254,7 @@ cd /usr/local/src
 sudo git clone https://github.com/srsRAN/srsRAN_4G.git
 cd srsRAN_4G
 
-# Patch FFTW_MEASURE → FFTW_ESTIMATE.  FFTW_MEASURE runs timing
-# benchmarks that block indefinitely when the RF backend is ZMQ
-# (no real-time clock).  FFTW_ESTIMATE skips the benchmarks so PHY
-# initialization completes immediately.
+# Patch FFTW_MEASURE → FFTW_ESTIMATE (see SRSRAN_EDITS.md for rationale)
 sudo sed -i 's/FFTW_MEASURE/FFTW_ESTIMATE/g' lib/src/phy/dft/dft_fftw.c
 
 sudo mkdir build && cd build

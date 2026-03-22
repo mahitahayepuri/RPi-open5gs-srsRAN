@@ -17,9 +17,8 @@ these versions were chosen and **how** to override them.
 
 | Variable               | File                   | Used by            |
 |------------------------|------------------------|--------------------|
-| `srsran_source_version`| `group_vars/gnb.yml`   | gNB compile & config |
+| `srsran_source_version`| `group_vars/all.yml`   | gNB compile, config, and Grafana |
 | `srsue_source_version` | `group_vars/ue.yml`    | srsUE compile & config |
-| `srsran_source_version`| `group_vars/all.yml`   | Grafana metrics stack clone |
 
 ---
 
@@ -75,12 +74,15 @@ ansible-playbook -i inventory-pi4.ini srsue/playbooks/srsue.yml \
   -e srsue_source_version=master
 ```
 
+> **Custom forks:** To deploy from a private or student-modified srsRAN
+> repository, see [`PRIVATE_SRSRAN_REPO.md`](PRIVATE_SRSRAN_REPO.md).
+
 ### Permanently
 
 Edit the version variable in the corresponding `group_vars/` file:
 
 ```yaml
-# group_vars/gnb.yml
+# group_vars/all.yml  (used by both gNB compile and Grafana)
 srsran_source_version: "release_24_10_1"   # change this
 
 # group_vars/ue.yml

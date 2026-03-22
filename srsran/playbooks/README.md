@@ -31,7 +31,7 @@ Stage 4 breaks down further into:
 
 ## Configuration
 
-srsRAN variables are in `group_vars/gnb.yml`; shared variables are in `group_vars/all.yml`. Key settings:
+srsRAN variables are in `group_vars/gnb.yml`; shared variables (including `srsran_source_repo` and `srsran_source_version`) are in `group_vars/all.yml`. Key settings:
 
 | Variable | Default | Description |
 |---|---|---|

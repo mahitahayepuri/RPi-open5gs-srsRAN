@@ -14,6 +14,8 @@
         version: "{{ srsue_source_version }}"
         depth: 1
         force: true
+      environment:
+        GIT_TERMINAL_PROMPT: "0"
 
     - name: "Create build directory"
       ansible.builtin.file:
@@ -28,9 +30,7 @@
         _srsue_jobs: >-
           {{ [[ansible_processor_vcpus, (ansible_memtotal_mb / 1500) | int] | min, 1] | max }}
 
-    # FFTW_MEASURE runs timing benchmarks that block indefinitely when the
-    # RF backend is ZMQ (no real-time clock).  Switching to FFTW_ESTIMATE
-    # makes PHY initialization complete immediately.
+    # FFTW_MEASURE blocks indefinitely over ZMQ — see SRSRAN_EDITS.md §1.
     - name: "Patch FFTW_MEASURE → FFTW_ESTIMATE in DFT library"
       ansible.builtin.replace:
         path: "{{ srsue_source_dir }}/lib/src/phy/dft/dft_fftw.c"
