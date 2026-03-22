@@ -63,6 +63,31 @@
       delay: 3
       until: _webui_health is not failed
 
+    # The upstream WebUI only seeds the default admin account in dev mode
+    # (NODE_ENV!=production), but the container runs in production mode.
+    # Seed it here using the app's own Account model so the hash is correct.
+    - name: "Seed default admin account (admin / 1423)"
+      ansible.builtin.command:
+        cmd: >-
+          docker exec open5gs-webui node -e "
+            const mongoose = require('mongoose');
+            const Account = require('./server/models/account.js');
+            mongoose.connect(process.env.DB_URI || 'mongodb://127.0.0.1/open5gs',
+              { useNewUrlParser: true, useUnifiedTopology: true }).then(() => {
+              Account.count((err, count) => {
+                if (count) { console.log('admin account already exists'); process.exit(0); }
+                const a = new Account(); a.username = 'admin'; a.roles = ['admin'];
+                Account.register(a, '1423', (err) => {
+                  if (err) { console.error(err); process.exit(1); }
+                  console.log('admin account created');
+                  process.exit(0);
+                });
+              });
+            });
+          "
+      register: _admin_seed
+      changed_when: "'created' in _admin_seed.stdout"
+
     - name: "Show WebUI access URL"
       ansible.builtin.debug:
         msg: "Open5GS WebUI available at http://{{ ansible_default_ipv4.address }}:{{ open5gs_webui_port }} (login: admin / 1423)"
