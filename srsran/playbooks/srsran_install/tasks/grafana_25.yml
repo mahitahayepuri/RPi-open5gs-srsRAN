@@ -1,0 +1,96 @@
+---
+# tasks/grafana_25.yml — release_25_10+ metrics stack
+#
+# Architecture:  gNB WebSocket (:8001) → Telegraf → InfluxDB 3 → Grafana 12
+#
+# The upstream srsRAN docker/ directory ships docker-compose.ui.yml with
+# services: telegraf, influxdb, grafana.  Telegraf connects to the gNB's
+# WebSocket remote_control endpoint and pushes to InfluxDB 3 (Core edition).
+#
+# The gNB exposes metrics on ws://<bind_addr>:8001 by default in release_25_10+.
+# Telegraf must be able to reach this address from inside the Docker container.
+# Docker bridge networking allows containers to reach external host IPs, so
+# we point WS_URL at the gNB's RAN backhaul IP.
+
+# --- .env override -----------------------------------------------------------
+# The upstream .env assumes all services run in Docker on the same host.
+# We override WS_URL to point Telegraf at the gNB on the remote Pi, and
+# set Grafana's internal port so the host mapping (3300:GF_PORT) works.
+
+- name: "Deploy customised .env for the Telegraf stack"
+  ansible.builtin.copy:
+    dest: "{{ srsran_grafana_source_dir }}/docker/.env"
+    mode: "0644"
+    content: |
+      ## Telegraf
+      WS_URL={{ srsran_grafana_gnb_addr }}:8001
+      TELEGRAF_VERSION=1.35.0
+      TELEGRAF_INPUT_INTERVAL=1s
+      TELEGRAF_OUTPUT_INTERVAL=1s
+      TELEGRAF_BUFFER_LIMIT=10000
+
+      ## InfluxDB 3
+      INFLUXDB3_VERSION=3.1.0-core
+      INFLUXDB3_PORT=8081
+      INFLUXDB3_HTTP_BIND_ADDR=0.0.0.0:8081
+      INFLUXDB3_HOST_URL=http://127.0.0.1:8081
+      INFLUXDB3_EXTERNAL_URL=http://influxdb:8081
+      # Lab-only placeholder token; InfluxDB Core edition does not enforce auth
+      INFLUXDB3_AUTH_TOKEN=fake-token-1234567890abcdef
+      INFLUXDB3_BUCKET=srsran
+      INFLUXDB3_TESTBED=default
+      INFLUXDB3_LOG_LEVEL=error
+      INFLUXDB3_RATE_LIMIT=0
+      INFLUXDB3_RATE_LIMIT_PERIOD=0s
+
+      ## Grafana
+      GF_VERSION=12.0.2
+      GF_PORT=3000
+      GF_LOGO_URL=https://raw.githubusercontent.com/srsran/srsRAN_Project_docs/main/docs/source/.imgs/logo.png
+      GF_AUTH_ANONYMOUS_ENABLED=true
+      GF_LOG_LEVEL=warning
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL=1s
+      GF_PLUGINS_PLUGIN_ADMIN_ENABLED=false
+
+# --- Build and start the three Telegraf-stack services -----------------------
+
+- name: "Build and start Grafana stack (Telegraf + InfluxDB 3 + Grafana)"
+  ansible.builtin.shell: >
+    docker compose -f docker-compose.ui.yml up -d --build
+  args:
+    chdir: "{{ srsran_grafana_source_dir }}/docker"
+  register: _grafana_compose
+  changed_when: "'Started' in _grafana_compose.stderr or 'Created' in _grafana_compose.stderr"
+
+# --- Health checks -----------------------------------------------------------
+# InfluxDB 3 port 8081 is not published to the host, so we check via docker exec.
+
+- name: "Wait for InfluxDB 3 to become healthy"
+  ansible.builtin.command:
+    cmd: docker exec influxdb curl -sf http://127.0.0.1:8081/health
+  register: _influx_health
+  until: _influx_health.rc == 0
+  retries: 20
+  delay: 3
+  changed_when: false
+
+- name: "Wait for Grafana to become healthy"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ srsran_grafana_port }}/api/health"
+    return_content: true
+    status_code: 200
+  register: _grafana_health
+  until: _grafana_health.status == 200
+  retries: 15
+  delay: 2
+
+- name: "Verify Grafana datasource is provisioned"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ srsran_grafana_port }}/api/datasources"
+    user: admin
+    password: admin
+    force_basic_auth: true
+    return_content: true
+    status_code: 200
+  register: _grafana_ds
+  failed_when: "'InfluxDB' not in _grafana_ds.content"

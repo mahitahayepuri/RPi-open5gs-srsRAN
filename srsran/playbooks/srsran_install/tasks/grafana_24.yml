@@ -1,0 +1,101 @@
+---
+# tasks/grafana_24.yml — release_24_10_1 metrics stack
+#
+# Architecture:  gNB → UDP JSON → metrics_server (Python) → InfluxDB 2.7 → Grafana 10
+#
+# The upstream srsRAN docker/ directory ships docker-compose.yml with five
+# services (5gc, gnb, metrics-server, influxdb, grafana).  We only need the
+# last three — the 5GC and gNB run natively on the Pis.
+#
+# The metrics_server container listens on UDP 55555 and pushes to InfluxDB.
+# The gNB must have enable_json_metrics: true and metrics.addr pointed at
+# this host (see install.yml and gnb.yml group_vars).
+
+# --- .env override -----------------------------------------------------------
+# The upstream .env works for the all-in-Docker setup.  We override it so
+# that UDP port 55555 is published on the host's RAN address (so the gNB
+# on the other Pi can reach it) and Grafana is exposed on the configured port.
+
+- name: "Deploy customised .env for the metrics stack"
+  ansible.builtin.copy:
+    dest: "{{ srsran_grafana_source_dir }}/docker/.env"
+    mode: "0644"
+    content: |
+      ## InfluxDB 2
+      DOCKER_INFLUXDB_VERSION=2.7
+
+      DOCKER_INFLUXDB_INIT_MODE=setup
+      DOCKER_INFLUXDB_INIT_USERNAME=admin
+      DOCKER_INFLUXDB_INIT_PASSWORD=admin1234
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN={{ srsran_grafana_influx_token }}
+      DOCKER_INFLUXDB_INIT_ORG=srs
+      DOCKER_INFLUXDB_INIT_BUCKET=srsran
+      DOCKER_INFLUXDB_INIT_RETENTION=4d
+
+      DOCKER_INFLUXDB_INIT_PORT=8086
+      DOCKER_INFLUXDB_INIT_HOST=influxdb
+
+      INFLUXD_LOG_LEVEL=error
+
+      ## Grafana
+      GRAFANA_PORT=3000
+
+      GF_AUTH_ANONYMOUS_ENABLED=true
+      GF_LOG_LEVEL=warning
+
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/dashboards/home.json
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL=1s
+
+      GRAFANA_DATASOURCE_INFLUXDB_UID=JOSE3g9KVz
+
+      ## Metrics Server
+      METRICS_SERVER_PORT=55555
+
+# --- Build and start only the three services we need -------------------------
+# We explicitly list the services to avoid docker compose trying to build the
+# 5gc and gnb services (which would fail and waste time).
+
+- name: "Build and start metrics stack (metrics-server + InfluxDB 2 + Grafana)"
+  ansible.builtin.shell: >
+    docker compose
+    -f docker-compose.yml
+    up -d --build
+    metrics-server influxdb grafana
+  args:
+    chdir: "{{ srsran_grafana_source_dir }}/docker"
+  register: _grafana_compose
+  changed_when: "'Started' in _grafana_compose.stderr or 'Created' in _grafana_compose.stderr"
+
+# --- Health checks -----------------------------------------------------------
+# InfluxDB port 8086 is not published to the host (it's internal to the
+# Docker metrics network), so we verify it via docker exec.
+
+- name: "Wait for InfluxDB to become healthy"
+  ansible.builtin.command:
+    cmd: docker exec influxdb influx ping
+  register: _influx_health
+  until: _influx_health.rc == 0
+  retries: 15
+  delay: 2
+  changed_when: false
+
+- name: "Wait for Grafana to become healthy"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ srsran_grafana_port }}/api/health"
+    return_content: true
+    status_code: 200
+  register: _grafana_health
+  until: _grafana_health.status == 200
+  retries: 15
+  delay: 2
+
+- name: "Verify Grafana datasource is provisioned"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ srsran_grafana_port }}/api/datasources"
+    user: admin
+    password: admin
+    force_basic_auth: true
+    return_content: true
+    status_code: 200
+  register: _grafana_ds
+  failed_when: "'InfluxDB' not in _grafana_ds.content"

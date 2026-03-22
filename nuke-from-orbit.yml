@@ -529,14 +529,25 @@
     # --- 11. Remove Grafana metrics stack (if deployed) ---------------
 
     # The Grafana stack runs as a docker-compose project in
-    # /opt/srsran-metrics.  Tear down the containers first.
-    - name: "Tear down Grafana docker-compose stack (if present)"
+    # /opt/srsran-metrics.  Two compose files exist depending on the
+    # srsRAN version: docker-compose.yml (release_24, metrics_server)
+    # and docker-compose.ui.yml (release_25+, Telegraf).  Try both.
+    - name: "Tear down Grafana docker-compose stack — release_24 (if present)"
+      ansible.builtin.command:
+        cmd: docker compose -f docker-compose.yml down --volumes --rmi all
+      args:
+        chdir: /opt/srsran-metrics/docker
+      register: _grafana_down_24
+      changed_when: _grafana_down_24.rc == 0
+      failed_when: false
+
+    - name: "Tear down Grafana docker-compose stack — release_25+ (if present)"
       ansible.builtin.command:
         cmd: docker compose -f docker-compose.ui.yml down --volumes --rmi all
       args:
         chdir: /opt/srsran-metrics/docker
-      register: _grafana_down
-      changed_when: _grafana_down.rc == 0
+      register: _grafana_down_25
+      changed_when: _grafana_down_25.rc == 0
       failed_when: false
 
     # Fallback: if the compose directory was already removed in a
@@ -546,8 +557,12 @@
       ansible.builtin.command:
         cmd: "docker rm -f {{ item }}"
       loop:
-        - grafana
+        # release_24 containers
+        - metrics_server
+        # release_25 containers
         - telegraf
+        # shared container names
+        - grafana
         - influxdb
       register: _grafana_rm
       changed_when: _grafana_rm.rc == 0
@@ -557,9 +572,14 @@
       ansible.builtin.command:
         cmd: "docker rmi -f {{ item }}"
       loop:
-        - srsran/grafana
+        # release_24 images
+        - srsran/metrics_server
+        - "influxdb:2.7"
+        # release_25 images
         - srsran/telegraf
         - "influxdb:3.1.0-core"
+        # shared images
+        - srsran/grafana
       register: _grafana_rmi
       changed_when: _grafana_rmi.rc == 0
       failed_when: false

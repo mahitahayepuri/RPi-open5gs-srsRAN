@@ -33,6 +33,8 @@ srsran_source_version: "release_24_10_1"   # pinned for srsUE compat (see VERSIO
 srsran_grafana_source_dir: "/opt/srsran-metrics"
 srsran_grafana_gnb_addr: "10.53.1.2"
 srsran_grafana_port: 3300
+# InfluxDB 2 admin token (release_24 only; lab-safe default — change for production)
+srsran_grafana_influx_token: "605bc59413b7d5457d181ccf20f9fda15693f81b068d70396cc183081b264f3b"
 
 # ---------------------------------------------------------------------------
 # Network identity — shared across core, gNB, and UE

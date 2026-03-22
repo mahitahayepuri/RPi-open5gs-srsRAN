@@ -111,9 +111,9 @@ srsran_uhd_srate: 23.04                    # sample rate in MHz
 # Metrics & Grafana dashboard
 # ---------------------------------------------------------------------------
 
-# gNB metrics endpoint (JSON metrics over TCP — Telegraf connects here)
-# In release_24_10_1 this is a simple JSON-over-TCP server, NOT WebSocket.
-# The remote_control WebSocket was introduced in release_25_10.
-srsran_metrics_enable: true                # enable JSON metrics endpoint
-srsran_metrics_bind_addr: "0.0.0.0"        # bind address for the metrics server
-srsran_metrics_port: 55555                 # TCP port for JSON metrics
+# gNB metrics endpoint — sends JSON metrics via UDP to a remote collector.
+# In release_24_10_1 the gNB pushes JSON over UDP to metrics_server.
+# In release_25_10+ it exposes a WebSocket on port 8001 (Telegraf pulls).
+srsran_metrics_enable: true                # enable metrics reporting
+srsran_metrics_addr: "{{ srsran_amf_addr }}"  # destination: core Pi where metrics_server runs
+srsran_metrics_port: 55555                 # UDP port for JSON metrics

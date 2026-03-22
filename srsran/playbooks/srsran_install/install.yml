@@ -178,10 +178,13 @@
           # Logs go to stdout → journald (systemd captures it).
           # rsyslog splits by component tag into /var/log/srsran/cucp.log, cuup.log, du.log
 
+          {# release_24: gNB pushes JSON metrics over UDP to metrics_server.     #}
+          {# release_25_10+: gNB auto-exposes WebSocket on :8001 (no config needed). #}
+          {% if srsran_metrics_enable | bool and srsran_source_version is match('release_24') %}
           metrics:
-            addr: {{ srsran_metrics_bind_addr }}
-          {% if srsran_metrics_enable | bool %}
+            addr: {{ srsran_metrics_addr }}
             port: {{ srsran_metrics_port | default(55555) }}
+            enable_json_metrics: true
           {% endif %}
 
     - name: "Deploy gNB systemd service"

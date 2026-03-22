@@ -33,7 +33,10 @@ ansible/
             ├── compile.yml                        # Clone repo, cmake configure, compile (async)
             ├── install.yml                        # Install binaries, deploy config + systemd service
             ├── network.yml                        # RAN backhaul secondary IP assignment
-            └── grafana.yml                        # Deploy Grafana metrics stack on [grafana] host
+            ├── grafana.yml                        # Deploy Grafana metrics stack on [grafana] host
+            └── tasks/
+                ├── grafana_24.yml                 # metrics_server + InfluxDB 2 + Grafana 10
+                └── grafana_25.yml                 # Telegraf + InfluxDB 3 + Grafana 12
 ```
 
 ## Pipeline Stages
@@ -92,15 +95,10 @@ Configures the RAN backhaul address so the gNB can reach the Open5GS core over a
 
 ### 6. Grafana Metrics Dashboard
 
-> **Note:** The Grafana stack is currently disabled pending rework for
-> `release_24_10_1`'s metrics architecture.  See `main.yml` TODO comment.
+Deploys the upstream srsRAN Grafana metrics stack on the `[grafana]` host (typically the Open5GS Pi). The playbook clones the srsRAN repository, detects the metrics architecture from the repo contents (`docker-compose.ui.yml` present → v25 stack, absent → v24 stack), and delegates to the matching task file:
 
-Deploys the upstream srsRAN Grafana metrics stack on the `[grafana]` host (typically the Open5GS Pi):
-
-- Clones the srsRAN repository to get the `docker/` directory (Dockerfiles, dashboards, metrics configs)
-- In `release_24_10_1`: the gNB exposes a JSON metrics endpoint on TCP port 55555; a `metrics_server` container connects to it and writes to InfluxDB 2.7
-- In `release_25_10`+: the gNB exposes a WebSocket on port 8001 and Telegraf connects to it, writing to InfluxDB 3
-- Grafana serves pre-provisioned dashboards on port 3300
+- **`release_24_10_1`** (and `release_25_04`) → `tasks/grafana_24.yml`: the gNB pushes JSON metrics over UDP to `metrics_server` (Python), which writes to **InfluxDB 2.7**; **Grafana 10.1** serves pre-provisioned dashboards on port 3300
+- **`release_25_10+`** → `tasks/grafana_25.yml`: the gNB auto-exposes a WebSocket on `:8001`; **Telegraf** connects and pushes to **InfluxDB 3 Core**; **Grafana 12** serves dashboards on port 3300
 
 ## Quick Start
 
@@ -242,11 +240,12 @@ Both ZMQ and UHD drivers are always compiled in. Set `srsran_rf_driver` to switc
 | Variable | Default | Description |
 |---|---|---|
 | `srsran_metrics_enable` | `true` | Enable JSON metrics endpoint on the gNB |
-| `srsran_metrics_bind_addr` | `0.0.0.0` | gNB metrics bind address |
-| `srsran_metrics_port` | `55555` | TCP port for JSON metrics |
+| `srsran_metrics_addr` | `{{ srsran_amf_addr }}` | Destination address for UDP metrics (core Pi) |
+| `srsran_metrics_port` | `55555` | UDP port for JSON metrics |
 | `srsran_grafana_source_dir` | `/opt/srsran-metrics` | Clone destination for docker/ on the Grafana host |
-| `srsran_grafana_gnb_addr` | `10.53.1.2` | gNB RAN backhaul IP (metrics_server connects here) |
+| `srsran_grafana_gnb_addr` | `10.53.1.2` | gNB RAN backhaul IP (used in release_25+ Telegraf variant) |
 | `srsran_grafana_port` | `3300` | Grafana UI port on the host |
+| `srsran_grafana_influx_token` | *(lab-safe default)* | InfluxDB 2 admin token (release_24 only) |
 
 ## Raspberry Pi Performance Notes
 
