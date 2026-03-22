@@ -53,17 +53,12 @@
   gather_facts: false
 
   tasks:
-    - name: "Start gNB service if not running"
+    # The test script restarts gNB internally to reset ZMQ sockets, but we
+    # need it running first so the script's pre-flight check passes.
+    - name: "Ensure gNB service is running"
       ansible.builtin.systemd:
         name: srsran-gnb
         state: started
-      register: _gnb_started
-
-    # Give the gNB a few seconds to establish the NGAP connection to the AMF
-    - name: "Wait for gNB → AMF NGAP connection"
-      ansible.builtin.pause:
-        seconds: 5     # NGAP association typically completes in 1-3s
-      when: _gnb_started is changed
 
     - name: "Deploy E2E test script"
       ansible.builtin.copy:
@@ -78,8 +73,8 @@
         PING_TARGET: "{{ srsran_amf_addr }}"
       register: _e2e_result
       failed_when: false
-      # The script handles its own timeout and cleanup; give Ansible
-      # enough time for the full attach + ping cycle.
+      # The script restarts gNB (~5s) then runs attach + ping; give
+      # Ansible enough time for the full cycle.
       timeout: 120
 
     - name: "Display test output"

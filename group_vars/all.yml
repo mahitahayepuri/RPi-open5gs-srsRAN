@@ -21,12 +21,15 @@ boot_config_path: "/boot/firmware/config.txt"
 pi_user: "pi"
 
 # ---------------------------------------------------------------------------
-# Grafana metrics stack (deployed on [grafana] host, typically the core Pi)
+# srsRAN Project source — single definition used by gNB compile AND Grafana
 # ---------------------------------------------------------------------------
-# These live in all.yml because the Grafana play runs on the core Pi but
-# needs srsRAN repo/version info for cloning the docker/ directory.
+# Defined here (all.yml) so both the gNB Pi and core Pi (Grafana) see the
+# same repo and version.  See PRIVATE_SRSRAN_REPO.md for instructions on
+# deploying from a custom or private fork.
 srsran_source_repo: "https://github.com/srsRAN/srsRAN_Project.git"
-srsran_source_version: "release_24_10_1"
+srsran_source_version: "release_24_10_1"   # pinned for srsUE compat (see VERSION_PINNING.md)
+
+# Grafana metrics stack (deployed on [grafana] host, typically the core Pi)
 srsran_grafana_source_dir: "/opt/srsran-metrics"
 srsran_grafana_gnb_addr: "10.53.1.2"
 srsran_grafana_port: 3300

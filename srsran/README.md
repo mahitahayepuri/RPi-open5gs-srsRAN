@@ -153,6 +153,12 @@ ansible-playbook -i inventory-pi5.ini srsran/playbooks/srsran.yml \
   -e srsran_source_version=release_24_10
 ```
 
+### Build from a student's custom fork
+
+See [`PRIVATE_SRSRAN_REPO.md`](../PRIVATE_SRSRAN_REPO.md) for full
+instructions on deploying from a private or custom srsRAN repository,
+including SSH key setup and per-host overrides.
+
 ### Start the gNB after deployment
 
 The playbook enables but does not start the gNB service (it needs an AMF to connect to). Once your Open5GS core is running:
@@ -167,20 +173,20 @@ ansible -i inventory-pi5.ini gnb -b -m systemd -a "name=srsran-gnb state=started
 
 ## Configuration Reference
 
-Variables are split across the top-level `group_vars/` directory. srsRAN-specific settings are in `group_vars/gnb.yml`; shared settings are in `group_vars/all.yml`.
+Variables are split across the top-level `group_vars/` directory. srsRAN-specific settings are in `group_vars/gnb.yml`; shared settings (including source repo and version) are in `group_vars/all.yml`.
 
 ### Build Settings
 
-| Variable | Default | Description |
-|---|---|---|
-| `srsran_source_repo` | `https://github.com/srsRAN/srsRAN_Project.git` | Git repository URL |
-| `srsran_source_version` | `main` | Git tag or branch to build |
-| `srsran_source_dir` | `/usr/local/src/srsRAN_Project` | Clone destination on the Pi |
-| `srsran_install_prefix` | `/usr/local` | CMake install prefix |
-| `srsran_cmake_build_type` | `Release` | CMake build type |
-| `srsran_build_jobs` | `0` (auto/nproc) | Parallel jobs for make |
-| `srsran_build_timeout` | `7200` | Async timeout in seconds (2 hours) |
-| `srsran_cmake_extra_flags` | `""` | Extra flags appended to cmake command |
+| Variable | Default | Defined in | Description |
+|---|---|---|---|
+| `srsran_source_repo` | `https://github.com/srsRAN/srsRAN_Project.git` | `all.yml` | Git repository URL (see [`PRIVATE_SRSRAN_REPO.md`](../PRIVATE_SRSRAN_REPO.md)) |
+| `srsran_source_version` | `release_24_10_1` | `all.yml` | Git tag or branch to build |
+| `srsran_source_dir` | `/usr/local/src/srsRAN_Project` | `gnb.yml` | Clone destination on the Pi |
+| `srsran_install_prefix` | `/usr/local` | `gnb.yml` | CMake install prefix |
+| `srsran_cmake_build_type` | `Release` | `gnb.yml` | CMake build type |
+| `srsran_build_jobs` | `0` (auto/nproc) | `gnb.yml` | Parallel jobs for make |
+| `srsran_build_timeout` | `7200` | `gnb.yml` | Async timeout in seconds (2 hours) |
+| `srsran_cmake_extra_flags` | `""` | `gnb.yml` | Extra flags appended to cmake command |
 
 ### Performance Tuning
 

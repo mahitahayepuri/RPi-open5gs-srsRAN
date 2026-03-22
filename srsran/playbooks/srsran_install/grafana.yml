@@ -30,6 +30,8 @@
         version: "{{ srsran_source_version }}"
         depth: 1
         force: true
+      environment:
+        GIT_TERMINAL_PROMPT: "0"
 
     # Override the upstream .env with our settings so Telegraf connects
     # to the gNB on the remote Pi rather than a local Docker container.

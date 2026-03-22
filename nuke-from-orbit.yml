@@ -365,6 +365,20 @@
       loop: "{{ _o5gs_bins.files }}"
       when: _o5gs_bins.matched > 0
 
+    # The open5gs packages register a dpkg-statoverride for /var/log/open5gs
+    # (owner=open5gs).  If the user is removed first, the stale override
+    # causes "unknown system user 'open5gs' in statoverride file" errors
+    # on the next apt-get dist-upgrade.  Remove the override before the user.
+    - name: "Remove dpkg-statoverride for /var/log/open5gs"
+      ansible.builtin.command:
+        cmd: dpkg-statoverride --remove /var/log/open5gs
+      register: _statoverride_rm
+      changed_when: _statoverride_rm.rc == 0
+      failed_when: >-
+        _statoverride_rm.rc != 0
+        and 'No such' not in _statoverride_rm.stderr
+        and 'no override' not in _statoverride_rm.stderr
+
     # Source installs create a dedicated system user/group
     - name: "Remove open5gs system user"
       ansible.builtin.user:

@@ -16,7 +16,8 @@
 # Environment variables (optional):
 #   SRSUE_BINARY    — path to srsue binary (default: /usr/local/bin/srsue)
 #   SRSUE_CONFIG    — path to ue.conf (default: /etc/srsran_4g/ue.conf)
-#   PING_TARGET     — IP to ping through tun_srsue (default: 10.53.1.1)
+#   PING_TARGET     — IP to ping through tun_srsue
+#                     (auto-detected from /etc/srsran/gnb.yml if unset)
 #   ATTACH_TIMEOUT  — seconds to wait for PDU session (default: 30)
 #   PING_COUNT      — number of ping packets (default: 3)
 #
@@ -30,11 +31,21 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 SRSUE_BINARY="${SRSUE_BINARY:-/usr/local/bin/srsue}"
 SRSUE_CONFIG="${SRSUE_CONFIG:-/etc/srsran_4g/ue.conf}"
-PING_TARGET="${PING_TARGET:-10.53.1.1}"
+# Auto-detect the core Pi's RAN address from the gNB config if PING_TARGET
+# is not set.  The AMF addr in /etc/srsran/gnb.yml is always the core Pi's
+# RAN IP — the same address the UE data path terminates at.
+if [[ -z "${PING_TARGET:-}" ]]; then
+  _gnb_cfg="/etc/srsran/gnb.yml"
+  if [[ -f "$_gnb_cfg" ]]; then
+    PING_TARGET=$(grep -Po '^\s*addr:\s*\K[\d.]+' "$_gnb_cfg" | head -1)
+  fi
+  PING_TARGET="${PING_TARGET:-10.53.1.1}"   # last-resort fallback
+fi
 ATTACH_TIMEOUT="${ATTACH_TIMEOUT:-30}"
 PING_COUNT="${PING_COUNT:-3}"
 TUN_IFACE="tun_srsue"
 UE_PID=""
+STDIN_PID=""
 
 # Auto-detect network namespace from UE config (if [gw] netns = ... is set)
 UE_NETNS=""
@@ -64,8 +75,24 @@ cleanup() {
   if [[ -n "$UE_PID" ]] && kill -0 "$UE_PID" 2>/dev/null; then
     printf "${YELLOW}Stopping srsUE (PID %s)...${RESET}\n" "$UE_PID"
     kill "$UE_PID" 2>/dev/null
+    # Grace period for NAS Deregistration over ZMQ (see SRSRAN_EDITS.md §2)
+    local grace=5
+    for i in $(seq 1 "$grace"); do
+      kill -0 "$UE_PID" 2>/dev/null || break
+      sleep 1
+    done
+    # If still alive after the grace period, force-kill.
+    if kill -0 "$UE_PID" 2>/dev/null; then
+      kill -9 "$UE_PID" 2>/dev/null
+    fi
     wait "$UE_PID" 2>/dev/null
   fi
+  # Kill the stdin-keepalive process and remove the FIFO
+  if [[ -n "$STDIN_PID" ]] && kill -0 "$STDIN_PID" 2>/dev/null; then
+    kill "$STDIN_PID" 2>/dev/null
+    wait "$STDIN_PID" 2>/dev/null
+  fi
+  rm -f "${_stdin_fifo:-}" 2>/dev/null
   # Remove TUN so it doesn't persist as a stale device after srsUE exits
   if [[ -n "$UE_NETNS" ]]; then
     $NS_EXEC ip link del "$TUN_IFACE" 2>/dev/null || true
@@ -120,7 +147,34 @@ else
   ip link del "$TUN_IFACE" 2>/dev/null || true
 fi
 
-"$SRSUE_BINARY" "$SRSUE_CONFIG" > /tmp/srsue_e2e.log 2>&1 &
+# Restart gNB to reset ZMQ transport.  The gNB's ZMQ sockets get stuck
+# after every srsUE session, regardless of how srsUE is stopped.
+# A service restart resets the sockets cleanly for the next connection.
+# See SRSUE.md "Known limitations (ZMQ mode)" for the full explanation.
+printf "  Restarting gNB to reset ZMQ transport...\n"
+systemctl restart srsran-gnb
+sleep 5   # NGAP association re-establishes in 1-3s; 5s gives ample margin
+if ! systemctl is-active --quiet srsran-gnb 2>/dev/null; then
+  printf "  ${RED}✗${RESET} gNB failed to restart\n"
+  exit 1
+fi
+printf "  ${GREEN}✓${RESET} gNB restarted (ZMQ sockets reset)\n"
+
+# Ensure the UE network namespace exists.  The install playbook creates it,
+# but a previous hard-kill or manual cleanup may have removed it.  srsUE
+# expects the namespace to be present — without it, GW interface setup fails.
+if [[ -n "$UE_NETNS" ]]; then
+  ip netns add "$UE_NETNS" 2>/dev/null || true
+fi
+
+# FIFO-based stdin keepalive — prevents srsUE from raising SIGTERM on
+# stdin EOF, which would freeze the gNB's ZMQ socket and break the next
+# run.  See SRSRAN_EDITS.md §2 for the full explanation.
+_stdin_fifo="/tmp/.srsue_stdin_$$"
+mkfifo "$_stdin_fifo"
+sleep infinity > "$_stdin_fifo" &
+STDIN_PID=$!
+"$SRSUE_BINARY" "$SRSUE_CONFIG" < "$_stdin_fifo" > /tmp/srsue_e2e.log 2>&1 &
 UE_PID=$!
 printf "  srsUE started (PID %s), waiting for PDU session...\n" "$UE_PID"
 
@@ -168,7 +222,7 @@ sleep 2
 
 # When a netns is used, srsUE creates the TUN inside it but only adds a
 # link-local /24 route.  We need a default route through the TUN so
-# traffic to the core Pi (e.g. 10.53.1.1) can flow.
+# traffic to the core Pi (PING_TARGET) can flow.
 if [[ -n "$UE_NETNS" ]]; then
   if ! $NS_EXEC ip route show default &>/dev/null || \
      [[ -z "$($NS_EXEC ip route show default 2>/dev/null)" ]]; then

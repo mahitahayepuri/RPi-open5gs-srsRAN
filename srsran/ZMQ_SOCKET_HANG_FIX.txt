@@ -1,0 +1,227 @@
+ZMQ Socket Hang — Proposed Source-Level Fix
+============================================
+
+Date:    March 2026
+Status:  Analysis complete, not yet implemented
+Branch:  (would require a custom srsRAN_Project fork)
+Effort:  ~20-25 lines across 2 files
+Risk:    Low — targeted change, gNB only, no protocol change
+
+
+Background
+----------
+
+After srsUE exits, the gNB's ZMQ radio transport enters a permanent
+"Waiting for reading samples" loop and cannot accept a new UE
+connection.  The current workaround is to restart the gNB service
+before each new srsUE session.  See SRSUE.md "Known limitations
+(ZMQ mode)" for the user-facing documentation.
+
+This file documents a source-level fix that would eliminate the need
+for the gNB restart.
+
+
+How the ZMQ transport works
+---------------------------
+
+The gNB has two channel types per antenna:
+
+  Channel   Socket     Role                   Direction
+  -------   ------     ----                   ---------
+  RX        ZMQ_REQ    client, connects       gNB sends 1-byte request,
+                       to port 2001           UE replies with IQ samples
+
+  TX        ZMQ_REP    server, binds          UE sends 1-byte request,
+                       on port 2000           gNB replies with IQ samples
+
+Each channel runs an async loop (run_async()) that alternates between
+two FSM states:
+
+  SEND_REQUEST / RECEIVE_REQUEST — send or receive the 1-byte handshake
+  RECEIVE_DATA / SEND_DATA       — exchange the actual IQ samples
+
+The REQ socket enforces strict send/recv alternation.  Once a request
+is sent, you must receive a reply before you can send again.
+
+Source files (in srsRAN_Project, tag release_24_10_1):
+
+  lib/radio/zmq/radio_zmq_rx_channel.cpp    — RX channel (ZMQ_REQ)
+  lib/radio/zmq/radio_zmq_rx_channel.h
+  lib/radio/zmq/radio_zmq_rx_channel_fsm.h  — RX channel state machine
+  lib/radio/zmq/radio_zmq_tx_channel.cpp    — TX channel (ZMQ_REP)
+  lib/radio/zmq/radio_zmq_tx_channel.h
+  lib/radio/zmq/radio_zmq_tx_channel_fsm.h  — TX channel state machine
+  lib/radio/zmq/radio_session_zmq_impl.cpp  — session setup, constants
+  lib/radio/zmq/radio_session_zmq_impl.h    — DEFAULT_TRX_TIMEOUT_MS = 10
+
+
+Where it breaks
+---------------
+
+1. gNB RX channel sends a 1-byte request via zmq_send(sock, &dummy, 1, 0).
+   FSM transitions to RECEIVE_DATA.
+
+2. srsUE exits.  Its REP socket on port 2001 closes.
+
+3. gNB RX receive_response() calls zmq_recv(..., ZMQ_DONTWAIT) — returns
+   EAGAIN (no data, peer gone).  The code handles EAGAIN by returning
+   without changing state.
+
+4. FSM stays in RECEIVE_DATA.  The async loop never calls send_request()
+   again because has_pending_response() returns true.
+
+5. The receive() consumer spins on an empty circular buffer, logging
+   "Waiting for reading samples. Completed 0 of 5760 samples." forever.
+
+The TX channel (ZMQ_REP, server/bind side) is NOT affected — REP sockets
+handle client disconnection and reconnection natively.
+
+
+Proposed fix
+------------
+
+Two parts, both in the RX channel only.
+
+PART 1 — Set ZMQ_REQ_RELAXED on the REQ socket
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+ZMQ_REQ_RELAXED (available since libzmq 4.0, 2013) allows a REQ socket
+to send a new request without having received a reply, silently
+discarding the stale pending state.  Raspberry Pi OS Bookworm ships
+libzmq 4.3.4, so this is available.
+
+In radio_zmq_rx_channel.cpp, in the constructor, after zmq_connect()
+and before the timeout setup:
+
+    // Allow the REQ socket to recover from a lost peer by sending a new
+    // request even if the previous reply was never received.
+    int relaxed = 1;
+    if (zmq_setsockopt(sock, ZMQ_REQ_RELAXED, &relaxed, sizeof(relaxed)) == -1) {
+      logger.error("Failed to set ZMQ_REQ_RELAXED. {}.", zmq_strerror(zmq_errno()));
+      return;
+    }
+    int correlate = 1;
+    if (zmq_setsockopt(sock, ZMQ_REQ_CORRELATE, &correlate, sizeof(correlate)) == -1) {
+      logger.error("Failed to set ZMQ_REQ_CORRELATE. {}.", zmq_strerror(zmq_errno()));
+      return;
+    }
+
+ZMQ_REQ_CORRELATE is paired with ZMQ_REQ_RELAXED — it ensures that
+replies are matched to the most recent request, discarding stale ones.
+
+PART 2 — Add a recovery path in the FSM
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+ZMQ_REQ_RELAXED makes the socket capable of recovery, but the FSM must
+also cooperate.  Currently, when stuck in RECEIVE_DATA with EAGAIN, the
+code just returns and retries — forever.
+
+Add a consecutive-timeout counter to the RX channel.  If EAGAIN is
+returned N times in a row (e.g., N = 200, which at ~10ms timeout = ~2s),
+reset the FSM to SEND_REQUEST:
+
+In radio_zmq_rx_channel.h, add a member:
+
+    unsigned consecutive_recv_timeouts = 0;
+    static constexpr unsigned MAX_RECV_TIMEOUTS = 200;  // ~2 seconds
+
+In radio_zmq_rx_channel.cpp, in receive_response():
+
+    if (n < 0) {
+      int err = zmq_errno();
+      if (err == EFSM || err == EAGAIN) {
+        ++consecutive_recv_timeouts;
+        if (consecutive_recv_timeouts >= MAX_RECV_TIMEOUTS) {
+          logger.warning("Peer lost. Resetting to SEND_REQUEST for recovery.");
+          consecutive_recv_timeouts = 0;
+          state_fsm.data_received();  // transitions RECEIVE_DATA -> SEND_REQUEST
+        }
+        return;
+      }
+      // ... existing error handling
+    }
+
+    // On successful receive, reset the counter:
+    consecutive_recv_timeouts = 0;
+
+
+What happens after the fix
+--------------------------
+
+1. srsUE exits — gNB RX is stuck in RECEIVE_DATA, getting EAGAIN.
+
+2. After ~2s of consecutive EAGAIN, the counter fires.  FSM resets to
+   SEND_REQUEST.
+
+3. run_async() now calls send_request().  ZMQ_REQ_RELAXED allows the
+   zmq_send() even though no reply was received for the previous request.
+
+4. If no peer yet, zmq_send() returns EAGAIN (10ms timeout).  The loop
+   retries — this is the normal "waiting for UE" state.
+
+5. New srsUE starts, binds port 2001.  ZMQ auto-reconnects the TCP
+   connection.
+
+6. Next zmq_send() succeeds — 1-byte request delivered.  srsUE replies
+   with samples.  Normal operation resumes.
+
+
+Scope
+-----
+
+- ~20-25 lines across 2 files:
+    radio_zmq_rx_channel.cpp  (socket options + counter logic)
+    radio_zmq_rx_channel.h    (counter member + constant)
+
+- gNB only — no changes to srsUE or the ZMQ protocol.
+
+- Builds with the existing CMake setup (-DENABLE_ZEROMQ=ON).
+
+- Deployable via the custom fork workflow described in
+  PRIVATE_SRSRAN_REPO.md.
+
+
+Risks and considerations
+------------------------
+
+- Sample discontinuity during recovery: there will be a ~2s gap where
+  no samples are exchanged.  The PHY will see a break.  For an
+  educational ZMQ setup this is completely fine.
+
+- Timeout tuning: MAX_RECV_TIMEOUTS = 200 at ~10ms = ~2s.  Too short
+  risks false resets during normal operation (unlikely — EAGAIN during
+  normal operation is cleared on the next successful recv).  Too long
+  delays recovery.  2s is reasonable vs the current 5s+ gNB restart.
+
+- libzmq version: ZMQ_REQ_RELAXED needs libzmq >= 4.0.  Pi OS Bookworm
+  ships 4.3.4.  No issue.
+
+- TX channel: likely needs no changes (REP/server sockets handle
+  reconnection natively), but should be verified on live hardware.
+
+- The srsRAN Project was archived February 2026.  This patch would
+  live in a custom fork (see PRIVATE_SRSRAN_REPO.md).
+
+
+Alternative approaches considered
+----------------------------------
+
+1. Replace REQ/REP with DEALER/ROUTER
+   - Eliminates the strict alternation constraint entirely.
+   - HIGH complexity: changes the protocol, requires changes on both
+     gNB and srsUE sides, risk of breaking sample timing.
+
+2. Close and recreate the socket on timeout
+   - Instead of ZMQ_REQ_RELAXED, destroy the stuck socket and create
+     a fresh one, re-connect to the same address.
+   - MEDIUM complexity: thread safety around socket lifecycle, but
+     guaranteed clean state.  More invasive than the proposed fix.
+
+3. External watchdog (systemd WatchdogSec)
+   - Have the gNB report health to systemd; auto-restart if unhealthy.
+   - Equivalent to our current workaround but automated at the systemd
+     level.  Doesn't fix the root cause.
+
+The ZMQ_REQ_RELAXED approach (proposed above) is the simplest and most
+targeted fix.  It works with the existing protocol and only changes the
+gNB's RX channel.

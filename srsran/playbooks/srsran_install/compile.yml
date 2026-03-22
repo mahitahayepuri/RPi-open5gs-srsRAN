@@ -12,8 +12,8 @@
         version: "{{ srsran_source_version }}"
         depth: 1
         force: true
-        username: "{{ srsran_git_username | default(omit) }}"
-        password: "{{ srsran_git_password | default(omit) }}"
+      environment:
+        GIT_TERMINAL_PROMPT: "0"
 
     - name: "Create build directory"
       ansible.builtin.file:

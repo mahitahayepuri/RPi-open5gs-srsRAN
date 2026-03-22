@@ -30,8 +30,9 @@ The playbook:
    - Starts srsUE in the background
    - Waits up to 30 seconds for a PDU session (watches for the `tun_srsue`
      interface to appear)
-   - Pings the core Pi's RAN address (`10.53.1.1`) through the `tun_srsue`
+   - Pings the core Pi's RAN address through the `tun_srsue`
      interface -- this traffic flows through the full 5G user plane
+     (the target IP is auto-detected from `/etc/srsran/gnb.yml`)
    - Stops srsUE and reports the result
 4. **Reports pass or fail** in the Ansible output
 
@@ -83,7 +84,7 @@ The script accepts environment variables for customisation:
 |---|---|---|
 | `SRSUE_BINARY` | `/usr/local/bin/srsue` | Path to srsue binary |
 | `SRSUE_CONFIG` | `/etc/srsran_4g/ue.conf` | Path to UE config file |
-| `PING_TARGET` | `10.53.1.1` | IP to ping through tun_srsue |
+| `PING_TARGET` | auto-detected | IP to ping through tun_srsue (read from `/etc/srsran/gnb.yml`; falls back to `10.53.1.1`) |
 | `ATTACH_TIMEOUT` | `30` | Seconds to wait for PDU session |
 | `PING_COUNT` | `3` | Number of ping packets |
 

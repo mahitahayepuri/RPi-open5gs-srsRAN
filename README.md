@@ -346,6 +346,11 @@ ansible/
 ├── LOGGING.md                    # Log files, monitoring, and debugging guide
 ├── RFHARDWARE.md                 # SDR hardware guide (USRP, filters, circulators, safety)
 ├── SRSRAN_PERFORMANCE.md         # Why we don't use the upstream srsran_performance script
+├── SRSRAN_EDITS.md               # Post-deployment source patches (FFTW, ZMQ hang)
+├── PRIVATE_SRSRAN_REPO.md        # Deploying from a custom srsRAN fork
+├── BE_THE_UE.md                  # Interactive UE testing guide (namespace, iperf, shutdown)
+├── CODING_STANDARDS.md           # Project coding and documentation conventions
+├── PI_MONITOR.md                 # Raspberry Pi monitoring tool
 ├── OPEN5GS_INSTALL_METHODS.md    # APT vs source compilation: differences and trade-offs
 ├── VERSION_PINNING.md            # srsRAN version pins: rationale, overrides, compat matrix
 ├── FIREWALL.md                   # Firewall port reference & recommended nftables rules
@@ -384,3 +389,8 @@ ansible/
 | srsRAN playbook internals | [`srsran/playbooks/srsran_install/README.md`](srsran/playbooks/srsran_install/README.md) |
 | srsRAN/srsUE version pins, compatibility, overrides | [`VERSION_PINNING.md`](VERSION_PINNING.md) |
 | Firewall ports & recommended nftables rules | [`FIREWALL.md`](FIREWALL.md) |
+| Interactive UE testing (namespace, iperf, shutdown) | [`BE_THE_UE.md`](BE_THE_UE.md) |
+| Post-deployment source patches (FFTW, ZMQ hang) | [`SRSRAN_EDITS.md`](SRSRAN_EDITS.md) |
+| Deploying from a custom srsRAN fork | [`PRIVATE_SRSRAN_REPO.md`](PRIVATE_SRSRAN_REPO.md) |
+| Project coding and documentation conventions | [`CODING_STANDARDS.md`](CODING_STANDARDS.md) |
+| Raspberry Pi monitoring tool | [`PI_MONITOR.md`](PI_MONITOR.md) |
