@@ -1,0 +1,42 @@
+gnb_id: 1
+gnb_id_bit_length: 22
+ran_node_name: srsgnb01
+
+cu_cp:
+  amf:
+    addr: 10.53.5.1
+    bind_addr: 10.53.5.2
+    supported_tracking_areas:
+      - tac: 7
+        plmn_list:
+          - plmn: "00101"
+            tai_slice_support_list:
+              - sst: 1
+
+ru_sdr:
+  device_driver: uhd
+  clock: internal
+  sync: internal
+  otw_format: sc12
+  srate: 23.04
+  tx_gain: 50
+  rx_gain: 60
+
+cell_cfg:
+  dl_arfcn: 620062
+  band: 77
+  channel_bandwidth_MHz: 10
+  common_scs: 30
+  plmn: "00101"
+  tac: 7
+
+log:
+  filename: stdout
+  all_level: info
+# Logs go to stdout → journald (systemd captures it).
+# rsyslog splits by component tag into /var/log/srsran/cucp.log, cuup.log, du.log
+
+metrics:
+  addr: 10.53.5.1
+  port: 55555
+  enable_json_metrics: true
