@@ -119,6 +119,24 @@
       changed_when: rc_onewire.rc == 0
       failed_when: false
 
+    # --- Disable Unnecessary services -----------------------------------------
+    # avahi-daemon (mDNS/service discovery) and ModemManager (cellular modem
+    # management) are not needed on headless 5G lab Pis and waste resources.
+    # ModemManager can also interfere with USB SDR devices.
+    # wpa_supplicant is redundant since Wi-Fi is disabled via dtoverlay.
+    
+    - name: "Disable and mask unnecessary services"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+        masked: true
+      loop:
+        - avahi-daemon
+        - ModemManager
+        - wpa_supplicant
+      failed_when: false
+
     # --- Shell quality-of-life ------------------------------------------------
 
     - name: "Enable bash history timestamps"
