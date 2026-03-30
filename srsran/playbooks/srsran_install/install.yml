@@ -200,6 +200,9 @@
 
           [Service]
           Type=simple
+          {% if srsran_rf_driver == 'uhd' %}
+          Environment=UHD_IMAGES_DIR=/usr/share/uhd/4.8.0/images
+          {% endif %}
           ExecStart={{ srsran_install_prefix }}/bin/gnb -c {{ srsran_gnb_config_path }}/{{ srsran_gnb_config_file }}
           SyslogIdentifier=srsran-gnb
           StandardOutput=journal
