@@ -99,7 +99,7 @@ srsran_zmq_tx_port: "tcp://127.0.0.1:2000"
 srsran_zmq_rx_port: "tcp://127.0.0.1:2001"
 
 # --- UHD-specific RF settings (used when srsran_rf_driver == "uhd") --------
-srsran_uhd_device_args: ""                 # e.g. "type=b200" (empty = auto-detect)
+srsran_uhd_device_args: "rx_antenna=RX2"   # e.g. "type=b200" (empty = auto-detect)
 srsran_uhd_clock: "internal"               # clock source: internal, external, gpsdo
 srsran_uhd_sync: "internal"                # time source: internal, external, gpsdo
 srsran_uhd_otw_format: "sc12"              # over-the-wire format (sc12 saves USB bandwidth)
