@@ -116,28 +116,49 @@
     # would be if Open5GS renamed the YAML keys themselves.
     # yq is installed by pi_setup.yml (common playbooks).
 
+    - name: "Read AMF NGAP address"
+      ansible.builtin.command:
+        cmd: yq '.amf.ngap.server[0].address' /etc/open5gs/amf.yaml
+      register: _amf_ngap_current
+      changed_when: false
+
     - name: "Patch AMF config — bind NGAP on RAN address"
       ansible.builtin.command:
         cmd: >-
           yq -i '.amf.ngap.server[0].address = "{{ open5gs_ran_addr }}"'
           /etc/open5gs/amf.yaml
-      register: _amf_ngap
-      changed_when: true
+      when: _amf_ngap_current.stdout | trim != open5gs_ran_addr
       notify: restart open5gs-stack
+
+    - name: "Read UPF GTP-U address"
+      ansible.builtin.command:
+        cmd: yq '.upf.gtpu.server[0].address' /etc/open5gs/upf.yaml
+      register: _upf_gtpu_current
+      changed_when: false
 
     - name: "Patch UPF config — bind GTP-U on RAN address"
       ansible.builtin.command:
         cmd: >-
           yq -i '.upf.gtpu.server[0].address = "{{ open5gs_ran_addr }}"'
           /etc/open5gs/upf.yaml
-      register: _upf_gtpu
-      changed_when: true
+      when: _upf_gtpu_current.stdout | trim != open5gs_ran_addr
       notify: restart open5gs-stack
 
     # --- Patch AMF PLMN and TAC to match the gNB configuration ---------------
     # The upstream default is MCC=999/MNC=70/TAC=1 (IANA test network).
     # The gNB's PLMN and TAC are derived from group_vars/all.yml. If these
     # don't match, the AMF rejects the NGAP association from the gNB.
+
+    - name: "Check AMF PLMN and TAC are already configured"
+      ansible.builtin.command:
+        cmd: >-
+          yq '
+            .amf.tai[0].tac == {{ open5gs_tac }} and
+            .amf.tai[0].plmn_id.mcc == "{{ open5gs_mcc }}" and
+            .amf.plmn_support[0].plmn_id.mnc == "{{ open5gs_mnc }}"
+          ' /etc/open5gs/amf.yaml
+      register: _amf_plmn_check
+      changed_when: false
 
     - name: "Patch AMF config — set PLMN and TAC"
       ansible.builtin.command:
@@ -151,13 +172,24 @@
             .amf.plmn_support[0].plmn_id.mcc = "{{ open5gs_mcc }}" |
             .amf.plmn_support[0].plmn_id.mnc = "{{ open5gs_mnc }}"
           ' /etc/open5gs/amf.yaml
-      changed_when: true
+      when: _amf_plmn_check.stdout | trim != "true"
       notify: restart open5gs-stack
 
     # --- Patch NRF serving PLMN -----------------------------------------------
     # The NRF must know its own PLMN so it can perform local NF discovery
     # instead of attempting inter-PLMN routing via SEPP.  Without this,
     # authentication requests fail with "No SEPP" / "NF-Discover failed [504]".
+
+    - name: "Check NRF serving PLMN is already configured"
+      ansible.builtin.command:
+        cmd: >-
+          yq '
+            .nrf.serving[0].plmn_id.mcc == "{{ open5gs_mcc }}" and
+            .nrf.serving[0].plmn_id.mnc == "{{ open5gs_mnc }}"
+          ' /etc/open5gs/nrf.yaml
+      register: _nrf_plmn_check
+      changed_when: false
+
     - name: "Patch NRF config — set serving PLMN"
       ansible.builtin.command:
         cmd: >-
@@ -165,7 +197,7 @@
             .nrf.serving[0].plmn_id.mcc = "{{ open5gs_mcc }}" |
             .nrf.serving[0].plmn_id.mnc = "{{ open5gs_mnc }}"
           ' /etc/open5gs/nrf.yaml
-      changed_when: true
+      when: _nrf_plmn_check.stdout | trim != "true"
       notify: restart open5gs-stack
 
   handlers:

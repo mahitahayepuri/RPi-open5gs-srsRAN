@@ -21,10 +21,9 @@
     # The built-in logger wrote to /var/log/open5gs/<nf>.log (e.g. amf.log);
     # we reuse those same filenames for the rsyslog output.
 
-    - name: "Patch NF configs — remove built-in file logger"
+    - name: "Check for built-in file logger key in NF configs"
       ansible.builtin.command:
-        cmd: >-
-          yq -i 'del(.logger)' /etc/open5gs/{{ item }}.yaml
+        cmd: yq 'has("logger")' /etc/open5gs/{{ item }}.yaml
       loop:
         - nrf
         - scp
@@ -37,7 +36,16 @@
         - pcf
         - nssf
         - bsf
-      changed_when: true
+      register: _logger_check
+      changed_when: false
+
+    - name: "Patch NF configs — remove built-in file logger"
+      ansible.builtin.command:
+        cmd: yq -i 'del(.logger)' /etc/open5gs/{{ item.item }}.yaml
+      loop: "{{ _logger_check.results }}"
+      when: item.stdout | trim == "true"
+      loop_control:
+        label: "{{ item.item }}"
 
     # Remove stale log files left by the built-in logger or by an older
     # rsyslog config that used the daemon suffix (e.g. amfd.log).
