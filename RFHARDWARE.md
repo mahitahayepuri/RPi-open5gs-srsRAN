@@ -181,12 +181,33 @@ Defined in `group_vars/gnb.yml`:
 | Variable | Default | Description |
 |---|---|---|
 | `srsran_uhd_device_args` | `""` (auto-detect) | Device args, e.g. `type=b200` |
+| `srsran_uhd_rx_antenna` | `""` (TX/RX port) | RX antenna port: `""` = TX/RX, `"RX2"` = dedicated RX2 port |
 | `srsran_uhd_clock` | `internal` | Clock source: `internal`, `external`, `gpsdo` |
 | `srsran_uhd_sync` | `internal` | Time source: `internal`, `external`, `gpsdo` |
 | `srsran_uhd_otw_format` | `sc12` | Over-the-wire format (`sc12` saves USB bandwidth) |
 | `srsran_uhd_tx_gain` | `50` | TX gain (0-89 for B200/B210) |
 | `srsran_uhd_rx_gain` | `60` | RX gain (0-76 for B200/B210) |
 | `srsran_uhd_srate` | `23.04` | Sample rate in MHz |
+
+### RX antenna port selection
+
+The B200/B210 has two RF ports: **TX/RX** (bidirectional) and **RX2** (receive-only).
+
+By default (`srsran_uhd_rx_antenna: ""`), the gNB uses the TX/RX port for both transmit and receive. This is the simplest setup and works for loopback bench testing.
+
+Use `RX2` when your RF chain separates TX and RX paths — for example, with a circulator where the circulator's isolated port feeds the RX2 input (the recommended setup described in the [Protecting the SDR](#protecting-the-sdr) section above).
+
+```bash
+# One-off
+ansible-playbook -i inventory-pi5.ini srsran/playbooks/srsran.yml \
+  -e srsran_rf_driver=uhd \
+  -e srsran_uhd_rx_antenna=RX2
+
+# Permanent — group_vars/gnb.yml
+srsran_uhd_rx_antenna: "RX2"
+```
+
+When `srsran_uhd_rx_antenna` is set, its value is appended to `device_args` as `rx_antenna=RX2`. If you also set `srsran_uhd_device_args` (e.g. `type=b200`), both are combined automatically: `type=b200,rx_antenna=RX2`.
 
 ### TX power considerations
 

@@ -142,8 +142,9 @@
             tx_gain: 75
             rx_gain: 75
           {% elif srsran_rf_driver == 'uhd' %}
-          {% if srsran_uhd_device_args %}
-            device_args: {{ srsran_uhd_device_args }}
+          {% set _uhd_args = [srsran_uhd_device_args, ('rx_antenna=' + srsran_uhd_rx_antenna) if srsran_uhd_rx_antenna else ''] | select | list %}
+          {% if _uhd_args %}
+            device_args: {{ _uhd_args | join(',') }}
           {% endif %}
             clock: {{ srsran_uhd_clock }}
             sync: {{ srsran_uhd_sync }}
