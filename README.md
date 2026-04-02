@@ -308,8 +308,8 @@ ansible-playbook -i inventory-pi5.ini reconfigure-rf.yml \
   -e rf_band=78 -e rf_bandwidth_mhz=20
 ```
 
-The playbook auto-calculates the DL ARFCN (center of band), subcarrier
-spacing (15 kHz for FDD, 30 kHz for TDD), and sample rate. Supported bands:
+The playbook auto-calculates the DL ARFCN, subcarrier spacing (15 kHz for
+FDD, 30 kHz for TDD), and sample rate. Supported bands:
 
 | Band | Duplex | Frequency | SCS |
 |---|---|---|---|
@@ -318,6 +318,32 @@ spacing (15 kHz for FDD, 30 kHz for TDD), and sample rate. Supported bands:
 | n41 | TDD | 2496-2690 MHz | 30 kHz |
 | n77 | TDD | 3300-4200 MHz | 30 kHz |
 | n78 | TDD | 3300-3800 MHz | 30 kHz |
+
+### ARFCN and GSCN alignment
+
+5G UEs only scan for cells at **GSCN-aligned frequencies** (3GPP TS 38.104
+Table 5.4.3.1-1). The playbook automatically snaps the DL ARFCN to the
+nearest valid GSCN position — a non-aligned ARFCN will not be detected by
+the UE during cell search.
+
+Three ways to specify the carrier frequency (highest to lowest priority):
+
+```bash
+# 1. Exact ARFCN — used as-is, no snapping
+ansible-playbook -i inventory-pi5.ini reconfigure-rf.yml \
+  -e rf_band=3 -e rf_bandwidth_mhz=10 -e rf_dl_arfcn=368450
+
+# 2. Approximate center frequency in MHz — snapped to nearest GSCN
+ansible-playbook -i inventory-pi5.ini reconfigure-rf.yml \
+  -e rf_band=3 -e rf_bandwidth_mhz=10 -e rf_center_mhz=1850
+
+# 3. Omit both — uses band center frequency, snapped to nearest GSCN
+ansible-playbook -i inventory-pi5.ini reconfigure-rf.yml \
+  -e rf_band=3 -e rf_bandwidth_mhz=10
+```
+
+The playbook output always shows the final ARFCN and its source, including
+the original value when snapping occurred.
 
 This is for UHD mode only -- ZMQ mode uses fixed RF parameters. See
 [`RFHARDWARE.md`](RFHARDWARE.md) for SDR setup instructions.
