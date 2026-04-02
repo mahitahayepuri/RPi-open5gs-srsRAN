@@ -119,43 +119,86 @@
           {{ _band.scs }} kHz SCS. Supported combinations:
           {{ _srate_table.keys() | join(', ') }}
 
-    # Calculate center-of-band DL ARFCN using 3GPP TS 38.104 formula
-    # For < 3 GHz:  ARFCN = freq_kHz / 5
-    # For >= 3 GHz: ARFCN = 600000 + (freq_kHz - 3000000) / 15
+    # Calculate center-of-band frequency, then snap to the nearest valid GSCN
+    # position (3GPP TS 38.104 Table 5.4.3.1-1).  UEs only scan for SSBs at
+    # GSCN-aligned frequencies; a non-aligned DL ARFCN will not be detected.
+    #
+    # FR1 low (< 3 GHz):  SS_ref = N*1200 kHz + M*50 kHz, M in {1,3,5}
+    #   ARFCN = SS_ref_kHz / 5
+    # FR1 high (>= 3 GHz): SS_ref = 3000000 kHz + N*1440 kHz
+    #   ARFCN = 600000 + (SS_ref_kHz - 3000000) / 15
+    #
+    # Override priority (highest to lowest):
+    #   rf_dl_arfcn   -- exact ARFCN, used as-is (no snapping)
+    #   rf_center_mhz -- approximate center frequency in MHz, snapped to GSCN
+    #   auto          -- band center, snapped to GSCN
+
+    - name: "Validate rf_center_mhz is within band DL range (if provided)"
+      ansible.builtin.assert:
+        that:
+          - (rf_center_mhz | float) * 1000 >= (_band.dl_low | int)
+          - (rf_center_mhz | float) * 1000 <= (_band.dl_high | int)
+        fail_msg: >-
+          rf_center_mhz={{ rf_center_mhz }} MHz is outside band n{{ rf_band }}
+          DL range ({{ _band.dl_low | int / 1000 }}–{{ _band.dl_high | int / 1000 }} MHz)
+      when: rf_center_mhz is defined
+
     - name: "Calculate center DL frequency"
       ansible.builtin.set_fact:
-        _center_khz: "{{ ((_band.dl_low | int) + (_band.dl_high | int)) / 2 }}"
+        _center_khz: >-
+          {{ ((rf_center_mhz | float) * 1000) | int
+             if rf_center_mhz is defined
+             else ((_band.dl_low | int) + (_band.dl_high | int)) / 2 }}
 
-    - name: "Calculate DL ARFCN from center frequency"
+    - name: "Snap center frequency to nearest GSCN-aligned ARFCN"
       ansible.builtin.set_fact:
-        _auto_arfcn: >-
-          {% if (_center_khz | float) < 3000000 -%}
-            {{ ((_center_khz | float) / 5) | int }}
+        _gscn_arfcn: >-
+          {%- set f = _center_khz | int -%}
+          {%- if f < 3000000 -%}
+            {%- set n = (f / 1200) | int -%}
+            {%- set candidates = [] -%}
+            {%- for n_try in [n, n + 1] -%}
+              {%- for m in [1, 3, 5] -%}
+                {%- set ss = n_try * 1200 + m * 50 -%}
+                {%- set _ = candidates.append({'arfcn': (ss // 5) | int, 'delta': (ss - f) | abs}) -%}
+              {%- endfor -%}
+            {%- endfor -%}
+            {{- (candidates | sort(attribute='delta') | first).arfcn -}}
           {%- else -%}
-            {{ (600000 + ((_center_khz | float) - 3000000) / 15) | int }}
-          {%- endif %}
+            {%- set n = ((f - 3000000) / 1440) | round | int -%}
+            {%- set ss = 3000000 + n * 1440 -%}
+            {{- (600000 + (ss - 3000000) // 15) | int -}}
+          {%- endif -%}
 
-    # Use student-provided ARFCN if given, otherwise auto-calculated
+    # Use student-provided ARFCN if given, otherwise GSCN-aligned auto value
     - name: "Set final RF parameters"
       ansible.builtin.set_fact:
         rf_params:
           band: "{{ rf_band | int }}"
-          dl_arfcn: "{{ rf_dl_arfcn | default(_auto_arfcn | trim) | int }}"
+          dl_arfcn: "{{ rf_dl_arfcn | default(_gscn_arfcn | trim) | int }}"
           bandwidth_mhz: "{{ rf_bandwidth_mhz | int }}"
           scs: "{{ _band.scs | int }}"
           duplex: "{{ _band.duplex }}"
           srate: "{{ _srate_table[_srate_key] }}"
           center_mhz: "{{ (_center_khz | float) / 1000 }}"
+          gscn_adjusted: "{{ rf_dl_arfcn is not defined and (_gscn_arfcn | trim | int) != ((_center_khz | float) / 5) | int }}"
 
     - name: "Display calculated RF configuration"
       ansible.builtin.debug:
         msg: |
           RF Configuration:
-            Band:       n{{ rf_params.band }} ({{ rf_params.duplex | upper }})
-            DL ARFCN:   {{ rf_params.dl_arfcn }}
-            Center:     {{ rf_params.center_mhz }} MHz
-            Bandwidth:  {{ rf_params.bandwidth_mhz }} MHz
-            SCS:        {{ rf_params.scs }} kHz
+            Band:        n{{ rf_params.band }} ({{ rf_params.duplex | upper }})
+            DL ARFCN:    {{ rf_params.dl_arfcn }}
+            {% if rf_dl_arfcn is defined -%}
+            ARFCN source: manual (rf_dl_arfcn={{ rf_dl_arfcn }}, no GSCN snapping)
+            {%- elif rf_params.gscn_adjusted -%}
+            ARFCN source: {% if rf_center_mhz is defined %}rf_center_mhz={{ rf_center_mhz }} MHz{% else %}band center{% endif %} → snapped to nearest GSCN (was {{ ((_center_khz | float) / 5) | int }})
+            {%- else -%}
+            ARFCN source: {% if rf_center_mhz is defined %}rf_center_mhz={{ rf_center_mhz }} MHz{% else %}band center{% endif %} (already GSCN-aligned)
+            {%- endif %}
+            Center:      {{ rf_params.center_mhz }} MHz
+            Bandwidth:   {{ rf_params.bandwidth_mhz }} MHz
+            SCS:         {{ rf_params.scs }} kHz
             Sample rate: {{ rf_params.srate }} MHz
 
 # ---------------------------------------------------------------------------

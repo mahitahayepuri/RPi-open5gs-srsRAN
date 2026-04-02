@@ -71,12 +71,22 @@ the MongoDB subscriber IMSI, and restarts affected services.  Omit the
 ## Reconfigure RF Band / Bandwidth (UHD only)
 
 ```bash
+# Band center ARFCN auto-calculated and snapped to nearest GSCN:
 ansible-playbook -i inventory-pi5.ini reconfigure-rf.yml \
   -e rf_band=78 -e rf_bandwidth_mhz=20
+
+# Approximate center frequency (snapped to nearest GSCN):
+ansible-playbook -i inventory-pi5.ini reconfigure-rf.yml \
+  -e rf_band=3 -e rf_bandwidth_mhz=10 -e rf_center_mhz=1850
+
+# Exact ARFCN (used as-is, no snapping):
+ansible-playbook -i inventory-pi5.ini reconfigure-rf.yml \
+  -e rf_band=3 -e rf_bandwidth_mhz=10 -e rf_dl_arfcn=368450
 ```
 
-Auto-calculates DL ARFCN, subcarrier spacing, and sample rate for the
-chosen band and bandwidth.  Only works when the gNB is in UHD mode.
+The DL ARFCN is automatically snapped to the nearest GSCN-aligned frequency
+— UEs only scan for cells at GSCN positions and will not detect a
+non-aligned cell. Only works when the gNB is in UHD mode.
 
 | Band | Duplex | Frequency | SCS |
 |---|---|---|---|
