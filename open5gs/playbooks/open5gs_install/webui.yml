@@ -34,8 +34,9 @@
     - name: "Stop and remove existing WebUI container (if any)"
       ansible.builtin.command:
         cmd: docker rm -f open5gs-webui
+      register: _webui_rm
       failed_when: false
-      changed_when: true
+      changed_when: '"No such container" not in _webui_rm.stderr'
 
     - name: "Start WebUI container"
       ansible.builtin.command:
